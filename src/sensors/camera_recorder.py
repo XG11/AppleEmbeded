@@ -3,6 +3,12 @@ import time
 import cv2
 from digit_interface import Digit
 
+import queue
+import threading
+
+import subprocess
+
+
 
 class DigitCameraRecorder:
     def __init__(self, output_video, output_timestamps, duration_sec=30,
@@ -58,6 +64,9 @@ class DigitCameraRecorder:
         print("DIGIT stopped")
 
 
+
+
+
 class GelSightMiniRecorder:
     def __init__(
         self,
@@ -65,10 +74,10 @@ class GelSightMiniRecorder:
         output_csv,
         duration_sec=30,
         device="/dev/video0",
-        width= 640, #3280,
-        height= 480, #2464,
-        fps=30,
-        save_preview_size=False,
+        width=3280,
+        height=2464,
+        fps=25,
+        queue_size=120,
     ):
         self.output_video = output_video
         self.output_csv = output_csv
@@ -77,14 +86,19 @@ class GelSightMiniRecorder:
         self.width = width
         self.height = height
         self.fps = fps
-        self.save_preview_size = save_preview_size
+        self.queue_size = queue_size
 
-    def run(self, session_t0_ns):
+    def run(self, session_t0_ns=None):
+        if session_t0_ns is None:
+            session_t0_ns = time.perf_counter_ns()
+
         cap = cv2.VideoCapture(self.device, cv2.CAP_V4L2)
 
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         cap.set(cv2.CAP_PROP_FPS, self.fps)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 4)
 
         if not cap.isOpened():
             raise RuntimeError(f"Could not open GelSight Mini camera: {self.device}")
@@ -95,13 +109,15 @@ class GelSightMiniRecorder:
             raise RuntimeError("Could not read first GelSight frame")
 
         actual_h, actual_w = frame.shape[:2]
-        print("GelSight started")
-        print("Actual frame size:", actual_w, "x", actual_h)
 
-        fourcc = cv2.VideoWriter_fourcc(*"MJPG")
+        print("GelSight started")
+        print("Requested:", self.width, "x", self.height, "@", self.fps, "FPS")
+        print("Actual frame size:", actual_w, "x", actual_h)
+        print("Camera-reported FPS:", cap.get(cv2.CAP_PROP_FPS))
+
         out = cv2.VideoWriter(
             self.output_video,
-            fourcc,
+            cv2.VideoWriter_fourcc(*"MJPG"),
             self.fps,
             (actual_w, actual_h),
         )
@@ -110,34 +126,191 @@ class GelSightMiniRecorder:
             cap.release()
             raise RuntimeError("Could not open video writer")
 
-        start_time = time.perf_counter()
-        frame_idx = 0
+        frame_q = queue.Queue(maxsize=self.queue_size)
+        stop_event = threading.Event()
 
-        with open(self.output_csv, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["frame_idx", "t_ns", "t_ms"])
+        stats = {
+            "captured": 0,
+            "written": 0,
+            "dropped": 0,
+        }
 
-            # write first frame
-            t_ns = time.perf_counter_ns()
-            writer.writerow([frame_idx, t_ns, (t_ns - session_t0_ns) / 1e6])
-            out.write(frame)
-            frame_idx += 1
+        def capture_loop():
+            start_time = time.perf_counter()
+
+            # include first frame
+            first_t_ns = time.perf_counter_ns()
+            try:
+                frame_q.put_nowait((0, first_t_ns, frame))
+                stats["captured"] += 1
+            except queue.Full:
+                stats["dropped"] += 1
 
             while time.perf_counter() - start_time < self.duration_sec:
-                ret, frame = cap.read()
+                ret, new_frame = cap.read()
                 if not ret:
                     continue
 
                 t_ns = time.perf_counter_ns()
-                t_ms = (t_ns - session_t0_ns) / 1e6
+                frame_idx = stats["captured"]
 
-                out.write(frame)
-                writer.writerow([frame_idx, t_ns, t_ms])
-                frame_idx += 1
+                try:
+                    frame_q.put_nowait((frame_idx, t_ns, new_frame))
+                    stats["captured"] += 1
+                except queue.Full:
+                    stats["dropped"] += 1
+
+            stop_event.set()
+
+        def write_loop():
+            with open(self.output_csv, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["frame_idx", "t_ns", "t_ms"])
+
+                while not stop_event.is_set() or not frame_q.empty():
+                    try:
+                        frame_idx, t_ns, queued_frame = frame_q.get(timeout=0.1)
+                    except queue.Empty:
+                        continue
+
+                    out.write(queued_frame)
+                    writer.writerow([
+                        frame_idx,
+                        t_ns,
+                        (t_ns - session_t0_ns) / 1e6,
+                    ])
+
+                    stats["written"] += 1
+
+        t_capture = threading.Thread(target=capture_loop)
+        t_write = threading.Thread(target=write_loop)
+
+        start = time.perf_counter()
+
+        t_capture.start()
+        t_write.start()
+
+        t_capture.join()
+        t_write.join()
+
+        elapsed = time.perf_counter() - start
 
         cap.release()
         out.release()
 
         print("GelSight stopped")
-        print("GelSight frames:", frame_idx)
-        print("GelSight FPS:", frame_idx / self.duration_sec)
+        print("Elapsed:", elapsed)
+        print("Captured frames:", stats["captured"])
+        print("Written frames:", stats["written"])
+        print("Dropped frames:", stats["dropped"])
+        print("Capture FPS:", stats["captured"] / elapsed)
+        print("Write FPS:", stats["written"] / elapsed)
+
+
+if __name__ == "__main__":
+    recorder = GelSightMiniRecorder(
+        output_video="gelsight_4k_mjpg.avi",
+        output_csv="gelsight_timestamps.csv",
+        duration_sec=30,
+        device="/dev/video0",
+        width=3280,
+        height=2464,
+        fps=25,
+    )
+
+    session_t0_ns = time.perf_counter_ns()
+    recorder.run(session_t0_ns)
+
+
+
+
+class GelSightRawMJPEGRecorder:
+    def __init__(
+        self,
+        output_video,
+        output_csv,
+        duration_sec=30,
+        device="/dev/video0",
+        width=3280,
+        height=2464,
+        fps=25,
+    ):
+        self.output_video = output_video
+        self.output_csv = output_csv
+        self.duration_sec = duration_sec
+        self.device = device
+        self.width = width
+        self.height = height
+        self.fps = fps
+
+    def run(self, session_t0_ns):
+        stop_event = threading.Event()
+
+        ffmpeg_cmd = [
+            "ffmpeg",
+            "-y",
+            "-f", "v4l2",
+            "-input_format", "mjpeg",
+            "-video_size", f"{self.width}x{self.height}",
+            "-framerate", str(self.fps),
+            "-i", self.device,
+            "-t", str(self.duration_sec),
+            "-c", "copy",
+            self.output_video,
+        ]
+
+        def timestamp_loop():
+            frame_interval = 1.0 / self.fps
+            frame_idx = 0
+            next_time = time.perf_counter()
+
+            with open(self.output_csv, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["frame_idx", "t_ns", "t_ms", "note"])
+
+                while not stop_event.is_set():
+                    t_ns = time.perf_counter_ns()
+                    writer.writerow([
+                        frame_idx,
+                        t_ns,
+                        (t_ns - session_t0_ns) / 1e6,
+                        "estimated_frame_time",
+                    ])
+
+                    frame_idx += 1
+                    next_time += frame_interval
+
+                    sleep_time = next_time - time.perf_counter()
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
+
+        ts_thread = threading.Thread(target=timestamp_loop, name="camera_timestamp_thread")
+
+        print("Starting raw MJPEG recording")
+        print("Command:", " ".join(ffmpeg_cmd))
+
+        start = time.perf_counter()
+        ts_thread.start()
+
+        proc = subprocess.Popen(
+            ffmpeg_cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        _, stderr = proc.communicate()
+
+        stop_event.set()
+        ts_thread.join()
+
+        elapsed = time.perf_counter() - start
+
+        if proc.returncode != 0:
+            print(stderr)
+            raise RuntimeError("ffmpeg raw MJPEG recording failed")
+
+        print("Raw MJPEG recording stopped")
+        print("Elapsed:", elapsed)
+        print("Expected FPS:", self.fps)
+        print("Expected frames:", int(self.duration_sec * self.fps))

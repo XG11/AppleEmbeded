@@ -5,7 +5,7 @@ import threading
 from datetime import datetime
 
 from sensors.imu_fifo_i2c import IMUFIFORecorder
-from sensors.camera_recorder import GelSightMiniRecorder
+from sensors.camera_recorder import GelSightRawMJPEGRecorder
 
 
 DURATION_SEC = 30
@@ -23,35 +23,36 @@ def main():
         duration_sec=DURATION_SEC,
     )
 
-    camera = GelSightMiniRecorder(
-        output_video=os.path.join(session_dir, "gelsight.avi"),
-        output_csv=os.path.join(session_dir, "gelsight_timestamps.csv"),
+    camera = GelSightRawMJPEGRecorder(
+        output_video=os.path.join(session_dir, "gelsight_raw_mjpeg.avi"),
+        output_csv=os.path.join(session_dir, "gelsight_timestamps_estimated.csv"),
         duration_sec=DURATION_SEC,
         device="/dev/video0",
-        width= 640, #3280,
-        height= 480, #2464,
-        fps=30,
+        width=3280,
+        height=2464,
+        fps=25,
     )
 
     metadata = {
         "session_name": session_name,
         "duration_sec": DURATION_SEC,
         "session_t0_ns": session_t0_ns,
+        "camera": {
+            "sensor": "GelSight Mini",
+            "device": "/dev/video0",
+            "width": 3280,
+            "height": 2464,
+            "fps": 25,
+            "format": "MJPEG",
+            "recording_method": "ffmpeg -c copy",
+            "video_file": "gelsight_raw_mjpeg.avi",
+            "timestamp_file": "gelsight_timestamps_estimated.csv",
+            "timestamp_warning": "Frame timestamps are estimated from recording start and FPS, not hardware frame arrival times.",
+        },
         "imu": {
             "sensor": "LSM6DSO32",
             "mode": "I2C FIFO accel only",
-            "CTRL1_XL": "0xAC",
-            "CTRL2_G": "0x00",
-            "FIFO_CTRL3": "0x0A",
-            "accel_scale_g_per_lsb": 0.000976 / 2,
-        },
-        "camera": {
-            "sensor": "DIGIT",
-            "serial_number": "D20966",
-            "fps_requested": 30,
-            "interface": "digit-interface",
-            "video_file": "digit.mp4",
-            "timestamp_file": "digit_timestamps.csv"
+            "output_file": "imu_fifo.csv",
         },
     }
 
@@ -64,10 +65,10 @@ def main():
     print("Recording to:", session_dir)
 
     imu_thread.start()
-    #cam_thread.start()
+    cam_thread.start()
 
     imu_thread.join()
-    #cam_thread.join()
+    cam_thread.join()
 
     print("Done.")
     print("Saved:", session_dir)
