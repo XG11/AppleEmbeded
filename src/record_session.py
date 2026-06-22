@@ -8,7 +8,7 @@ from sensors.imu_fifo_i2c import IMUFIFORecorder
 from sensors.camera_recorder import GelSightMiniRecorder, GelSightRawMJPEGRecorder, GelSightCPURAMsaverRecorder
 
 
-DURATION_SEC = 30
+DURATION_SEC = 120
 
 
 def main():
