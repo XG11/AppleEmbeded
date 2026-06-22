@@ -5,7 +5,7 @@ import threading
 from datetime import datetime
 
 from sensors.imu_fifo_i2c import IMUFIFORecorder
-from sensors.camera_recorder import GelSightRawMJPEGRecorder
+from sensors.camera_recorder import GelSightMiniRecorder, GelSightRawMJPEGRecorder, GelSightCPURAMsaverRecorder
 
 
 DURATION_SEC = 30
@@ -23,7 +23,7 @@ def main():
         duration_sec=DURATION_SEC,
     )
 
-    camera = GelSightRawMJPEGRecorder(
+    camera = GelSightCPURAMsaverRecorder(
         output_video=os.path.join(session_dir, "gelsight_raw_mjpeg.avi"),
         output_csv=os.path.join(session_dir, "gelsight_timestamps_estimated.csv"),
         duration_sec=DURATION_SEC,

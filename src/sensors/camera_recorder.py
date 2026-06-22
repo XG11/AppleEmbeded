@@ -7,6 +7,10 @@ import queue
 import threading
 
 import subprocess
+import os
+
+import signal
+
 
 
 
@@ -224,9 +228,6 @@ if __name__ == "__main__":
 
 
 
-import csv
-import subprocess
-import time
 
 
 class GelSightRawMJPEGRecorder:
@@ -329,3 +330,133 @@ if __name__ == "__main__":
     )
 
     recorder.run(session_t0_ns)
+
+
+
+class GelSightCPURAMsaverRecorder:
+    def __init__(
+        self,
+        output_video,
+        output_csv,
+        duration_sec,
+        device="/dev/video0",
+        width=3280,
+        height=2464,
+        fps=25,
+    ):
+        self.output_video = output_video
+        self.output_csv = output_csv
+        self.duration_sec = duration_sec
+        self.device = device
+        self.width = width
+        self.height = height
+        self.fps = fps
+
+        self._running = False
+        self._timestamp_thread = None
+        self._ffmpeg_proc = None
+
+    def _timestamp_worker(self, session_t0_ns):
+        period = 1.0 / self.fps
+
+        with open(self.output_csv, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                ["frame_idx", "t_ns", "t_ms", "estimated"]
+            )
+
+            frame_idx = 0
+            next_time = time.perf_counter()
+
+            while self._running:
+                now_ns = time.perf_counter_ns()
+                t_ns = now_ns - session_t0_ns
+
+                writer.writerow(
+                    [
+                        frame_idx,
+                        t_ns,
+                        t_ns / 1e6,
+                        True,
+                    ]
+                )
+
+                frame_idx += 1
+
+                next_time += period
+                sleep_time = next_time - time.perf_counter()
+
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+
+    def run(self, session_t0_ns):
+        os.makedirs(os.path.dirname(self.output_video), exist_ok=True)
+
+        ffmpeg_cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "warning",
+            "-f",
+            "v4l2",
+            "-input_format",
+            "mjpeg",
+            "-video_size",
+            f"{self.width}x{self.height}",
+            "-framerate",
+            str(self.fps),
+            "-use_wallclock_as_timestamps",
+            "1",
+            "-i",
+            self.device,
+            "-t",
+            str(self.duration_sec),
+            "-c:v",
+            "copy",
+            self.output_video,
+            "-y",
+        ]
+
+        print("Starting GelSight MJPEG recording")
+        print(" ".join(ffmpeg_cmd))
+
+        self._running = True
+
+        self._timestamp_thread = threading.Thread(
+            target=self._timestamp_worker,
+            args=(session_t0_ns,),
+            daemon=True,
+        )
+        self._timestamp_thread.start()
+
+        start = time.perf_counter()
+
+        self._ffmpeg_proc = subprocess.Popen(
+            ffmpeg_cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        self._ffmpeg_proc.wait()
+
+        elapsed = time.perf_counter() - start
+
+        self._running = False
+        self._timestamp_thread.join()
+
+        print("GelSight stopped")
+        print(f"Elapsed: {elapsed:.2f} s")
+        print(f"Expected FPS: {self.fps}")
+        print(f"Expected frames: {int(elapsed * self.fps)}")
+
+    def stop(self):
+        self._running = False
+
+        if (
+            self._ffmpeg_proc is not None
+            and self._ffmpeg_proc.poll() is None
+        ):
+            self._ffmpeg_proc.send_signal(signal.SIGINT)
+
+        if self._timestamp_thread is not None:
+            self._timestamp_thread.join(timeout=2)
