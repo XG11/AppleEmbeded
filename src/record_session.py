@@ -5,10 +5,11 @@ import threading
 from datetime import datetime
 
 from sensors.imu_fifo_i2c import IMUFIFORecorder
+from sensors.imu_fifo_SPI import IMUSPIFIFORecorder
 from sensors.camera_recorder import GelSightMiniRecorder, GelSightRawMJPEGRecorder, GelSightCPURAMsaverRecorder
 
 
-DURATION_SEC = 120
+DURATION_SEC = 15
 
 
 def main():
@@ -18,7 +19,7 @@ def main():
 
     session_t0_ns = time.perf_counter_ns()
 
-    imu = IMUFIFORecorder(
+    imu = IMUSPIFIFORecorder(
         output_csv=os.path.join(session_dir, "imu_fifo.csv"),
         duration_sec=DURATION_SEC,
     )
@@ -59,7 +60,7 @@ def main():
     with open(os.path.join(session_dir, "metadata.json"), "w") as f:
         json.dump(metadata, f, indent=2)
 
-    imu_thread = threading.Thread(target=imu.run, args=(session_t0_ns,))
+    imu_thread = threading.Thread(target=imu.run) #, args=(session_t0_ns,))
     cam_thread = threading.Thread(target=camera.run, args=(session_t0_ns,))
 
     print("Recording to:", session_dir)

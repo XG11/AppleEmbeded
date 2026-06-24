@@ -25,6 +25,7 @@ class IMUFIFORecorder:
     FIFO_DATA_OUT_TAG = 0x78
 
     ACCEL_SCALE = 0.000976 / 2  # g/LSB for your current setup
+    GYRO_SCALE = 0.07
 
     def __init__(self, output_csv, duration_sec=30):
         self.output_csv = output_csv
@@ -60,13 +61,13 @@ class IMUFIFORecorder:
 
             self.write_reg(bus, self.CTRL3_C, 0x44)
 
-            self.write_reg(bus, self.CTRL1_XL, 0xAC)
-            self.write_reg(bus, self.CTRL2_G, 0x00)
+            self.write_reg(bus, self.CTRL1_XL, 0x8C)
+            self.write_reg(bus, self.CTRL2_G, 0x8C)
 
-            self.write_reg(bus, self.FIFO_CTRL1, 128)
+            self.write_reg(bus, self.FIFO_CTRL1, 255)
             self.write_reg(bus, self.FIFO_CTRL2, 0x00)
 
-            self.write_reg(bus, self.FIFO_CTRL3, 0x0A)
+            self.write_reg(bus, self.FIFO_CTRL3, 0x88)
             self.write_reg(bus, self.FIFO_CTRL4, 0x06)
 
             self.write_reg(bus, self.INT1_CTRL, 0X08)
@@ -79,7 +80,7 @@ class IMUFIFORecorder:
 
             with open(self.output_csv, "w", newline="", buffering=1024 * 1024) as f:
                 writer = csv.writer(f)
-                writer.writerow(["t_ns", "t_ms", "sensor", "x_g", "y_g", "z_g"])
+                writer.writerow(["t_ns", "t_ms", "sensor", "x", "y", "z", "unit"])
 
                 while time.perf_counter() - start_time < self.duration_sec:
 
@@ -91,7 +92,7 @@ class IMUFIFORecorder:
                     if level == 0:
                         continue
 
-                    n_samples = min(level, 128)
+                    n_samples = min(level, 255)
                     raw = self.read_fifo_bytes(bus, n_samples * 7)
 
                     t_ns = time.perf_counter_ns()
@@ -106,11 +107,31 @@ class IMUFIFORecorder:
                                 t_ns,
                                 t_ms,
                                 "accel",
+                                #round(x * self.ACCEL_SCALE, 2),
+                                #round(y * self.ACCEL_SCALE, 2),
+                                #round(z * self.ACCEL_SCALE, 2),
                                 x * self.ACCEL_SCALE,
                                 y * self.ACCEL_SCALE,
-                                z * self.ACCEL_SCALE,
+                                z * self.ACCEL_SCALE
                             ])
                             count += 1
+
+                        elif tag == 0x01:
+                            writer.writerow([
+                                t_ns,
+                                t_ms,
+                                "gyro",
+                                #round(x * self.GYRO_SCALE, 2),
+                                #round(y * self.GYRO_SCALE, 2),
+                                #round(z * self.GYRO_SCALE, 2),
+                                x * self.GYRO_SCALE,
+                                y * self.GYRO_SCALE,
+                                z * self.GYRO_SCALE,
+                                "dps"
+                        
+                            ])
+                            count += 1
+
 
                     now = time.perf_counter()
                     if now - last_print >= 1.0:
