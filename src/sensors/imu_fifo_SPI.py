@@ -2,7 +2,11 @@ import csv
 import struct
 import time
 import spidev
-from gpiozero import Button
+import Jetson.GPIO as GPIO
+
+
+def perf_counter_ns():
+    return int(time.perf_counter() * 1e9)
 
 
 class IMUSPIFIFORecorder:
@@ -20,13 +24,16 @@ class IMUSPIFIFORecorder:
     FIFO_STATUS2 = 0x3B
     FIFO_DATA_OUT_TAG = 0x78
 
-    ACCEL_SCALE_G = 0.000488      # ±16g
-    GYRO_SCALE_DPS = 0.07         # ±2000 dps
+    ACCEL_SCALE_G = 0.000488
+    GYRO_SCALE_DPS = 0.07
 
-    def __init__(self, output_csv="imu_spi_fifo.csv", duration_sec=30):
+    def __init__(self, output_csv="imu_spi_fifo.csv", duration_sec=30, int_pin=11):
         self.output_csv = output_csv
         self.duration_sec = duration_sec
-        self.fifo_int = Button(17, pull_up=False)
+        self.int_pin = int_pin
+
+        GPIO.setmode(GPIO.BOARD)
+        GPIO.setup(self.int_pin, GPIO.IN)
 
     def write_reg(self, spi, reg, val):
         spi.xfer2([reg & 0x7F, val & 0xFF])
@@ -44,9 +51,17 @@ class IMUSPIFIFORecorder:
         s2 = self.read_reg(spi, self.FIFO_STATUS2)
         return s1 | ((s2 & 0x03) << 8)
 
+    def wait_for_fifo_int(self, timeout=0.1):
+        start = time.perf_counter()
+        while time.perf_counter() - start < timeout:
+            if GPIO.input(self.int_pin) == GPIO.HIGH:
+                return True
+            time.sleep(0.0005)
+        return False
+
     def run(self):
         spi = spidev.SpiDev()
-        spi.open(0, 0)              # bus 0, CE0
+        spi.open(1, 1)
         spi.max_speed_hz = 10_000_000
         spi.mode = 3
 
@@ -57,39 +72,29 @@ class IMUSPIFIFORecorder:
             self.write_reg(spi, self.CTRL3_C, 0x01)
             time.sleep(0.1)
 
-            # BDU + register auto-increment
             self.write_reg(spi, self.CTRL3_C, 0x44)
 
-            # Accel: 6.66 kHz, ±16g
             self.write_reg(spi, self.CTRL1_XL, 0xAC)
-
-            # Gyro: 6.66 kHz, ±2000 dps
             self.write_reg(spi, self.CTRL2_G, 0xAC)
 
-            # FIFO watermark = 255 entries
             self.write_reg(spi, self.FIFO_CTRL1, 255)
             self.write_reg(spi, self.FIFO_CTRL2, 0x00)
 
-            # Batch accel + gyro at 6.66 kHz
             self.write_reg(spi, self.FIFO_CTRL3, 0xAA)
-
-            # Continuous FIFO mode
             self.write_reg(spi, self.FIFO_CTRL4, 0x06)
 
-            # FIFO watermark interrupt on INT1
             self.write_reg(spi, self.INT1_CTRL, 0x08)
 
             print("Warming up...")
             time.sleep(0.5)
 
-            # Drain startup FIFO
             level = self.fifo_level(spi)
             if level > 0:
                 self.read_fifo_bytes(spi, min(level, 255) * 7)
 
             print("Recording...")
 
-            t0_ns = time.perf_counter_ns()
+            t0_ns = perf_counter_ns()
             start = time.perf_counter()
             last_print = start
             count = 0
@@ -99,7 +104,7 @@ class IMUSPIFIFORecorder:
                 writer.writerow(["t_ns", "t_ms", "sensor", "x", "y", "z", "unit"])
 
                 while time.perf_counter() - start < self.duration_sec:
-                    self.fifo_int.wait_for_press(timeout=0.1)
+                    self.wait_for_fifo_int(timeout=0.1)
 
                     level = self.fifo_level(spi)
                     if level == 0:
@@ -108,7 +113,7 @@ class IMUSPIFIFORecorder:
                     n_samples = min(level, 255)
                     raw = self.read_fifo_bytes(spi, n_samples * 7)
 
-                    t_ns = time.perf_counter_ns()
+                    t_ns = perf_counter_ns()
                     t_ms = (t_ns - t0_ns) / 1e6
 
                     for i in range(0, len(raw), 7):
@@ -121,6 +126,7 @@ class IMUSPIFIFORecorder:
                                 round(x * self.GYRO_SCALE_DPS, 2),
                                 round(y * self.GYRO_SCALE_DPS, 2),
                                 round(z * self.GYRO_SCALE_DPS, 2),
+                                "dps",
                             ])
                             count += 1
 
@@ -130,6 +136,7 @@ class IMUSPIFIFORecorder:
                                 round(x * self.ACCEL_SCALE_G, 2),
                                 round(y * self.ACCEL_SCALE_G, 2),
                                 round(z * self.ACCEL_SCALE_G, 2),
+                                "g",
                             ])
                             count += 1
 
@@ -146,6 +153,7 @@ class IMUSPIFIFORecorder:
             self.write_reg(spi, self.CTRL1_XL, 0x00)
             self.write_reg(spi, self.CTRL2_G, 0x00)
             spi.close()
+            GPIO.cleanup()
             print("IMU stopped.")
 
 
@@ -153,5 +161,6 @@ if __name__ == "__main__":
     recorder = IMUSPIFIFORecorder(
         output_csv="imu_spi_fifo_30s.csv",
         duration_sec=30,
+        int_pin=11,
     )
     recorder.run()

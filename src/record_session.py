@@ -6,7 +6,7 @@ from datetime import datetime
 
 from sensors.imu_fifo_i2c import IMUFIFORecorder
 from sensors.imu_fifo_SPI import IMUSPIFIFORecorder
-from sensors.camera_recorder import GelSightMiniRecorder, GelSightRawMJPEGRecorder, GelSightCPURAMsaverRecorder
+from sensors.camera_recorder import GelSightCPURAMsaverRecorder
 
 
 DURATION_SEC = 15
@@ -17,11 +17,12 @@ def main():
     session_dir = os.path.join(os.getcwd(), session_name)
     os.makedirs(session_dir, exist_ok=True)
 
-    session_t0_ns = time.perf_counter_ns()
+    session_t0_ns = int(time.perf_counter() * 1e9)
 
     imu = IMUSPIFIFORecorder(
         output_csv=os.path.join(session_dir, "imu_fifo.csv"),
         duration_sec=DURATION_SEC,
+	int_pin = 11
     )
 
     camera = GelSightCPURAMsaverRecorder(

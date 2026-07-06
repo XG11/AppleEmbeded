@@ -1,7 +1,7 @@
 import csv
 import time
-import cv2
-from digit_interface import Digit
+#import cv2
+#from digit_interface import Digit
 
 import queue
 import threading
@@ -14,7 +14,7 @@ import signal
 
 
 
-class DigitCameraRecorder:
+'''class DigitCameraRecorder:
     def __init__(self, output_video, output_timestamps, duration_sec=30,
                  serial_number="D20966", fps=30):
         self.output_video = output_video
@@ -67,10 +67,9 @@ class DigitCameraRecorder:
         sensor.disconnect()
         print("DIGIT stopped")
 
+'''
 
-
-
-
+'''
 class GelSightMiniRecorder:
     def __init__(
         self,
@@ -125,109 +124,7 @@ class GelSightMiniRecorder:
             self.fps,
             (actual_w, actual_h),
         )
-
-        if not out.isOpened():
-            cap.release()
-            raise RuntimeError("Could not open video writer")
-
-        frame_q = queue.Queue(maxsize=self.queue_size)
-        stop_event = threading.Event()
-
-        stats = {
-            "captured": 0,
-            "written": 0,
-            "dropped": 0,
-        }
-
-        def capture_loop():
-            start_time = time.perf_counter()
-
-            # include first frame
-            first_t_ns = time.perf_counter_ns()
-            try:
-                frame_q.put_nowait((0, first_t_ns, frame))
-                stats["captured"] += 1
-            except queue.Full:
-                stats["dropped"] += 1
-
-            while time.perf_counter() - start_time < self.duration_sec:
-                ret, new_frame = cap.read()
-                if not ret:
-                    continue
-
-                t_ns = time.perf_counter_ns()
-                frame_idx = stats["captured"]
-
-                try:
-                    frame_q.put_nowait((frame_idx, t_ns, new_frame))
-                    stats["captured"] += 1
-                except queue.Full:
-                    stats["dropped"] += 1
-
-            stop_event.set()
-
-        def write_loop():
-            with open(self.output_csv, "w", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow(["frame_idx", "t_ns", "t_ms"])
-
-                while not stop_event.is_set() or not frame_q.empty():
-                    try:
-                        frame_idx, t_ns, queued_frame = frame_q.get(timeout=0.1)
-                    except queue.Empty:
-                        continue
-
-                    out.write(queued_frame)
-                    writer.writerow([
-                        frame_idx,
-                        t_ns,
-                        (t_ns - session_t0_ns) / 1e6,
-                    ])
-
-                    stats["written"] += 1
-
-        t_capture = threading.Thread(target=capture_loop)
-        t_write = threading.Thread(target=write_loop)
-
-        start = time.perf_counter()
-
-        t_capture.start()
-        t_write.start()
-
-        t_capture.join()
-        t_write.join()
-
-        elapsed = time.perf_counter() - start
-
-        cap.release()
-        out.release()
-
-        print("GelSight stopped")
-        print("Elapsed:", elapsed)
-        print("Captured frames:", stats["captured"])
-        print("Written frames:", stats["written"])
-        print("Dropped frames:", stats["dropped"])
-        print("Capture FPS:", stats["captured"] / elapsed)
-        print("Write FPS:", stats["written"] / elapsed)
-
-
-if __name__ == "__main__":
-    recorder = GelSightMiniRecorder(
-        output_video="gelsight_4k_mjpg.avi",
-        output_csv="gelsight_timestamps.csv",
-        duration_sec=30,
-        device="/dev/video0",
-        width=3280,
-        height=2464,
-        fps=25,
-    )
-
-    session_t0_ns = time.perf_counter_ns()
-    recorder.run(session_t0_ns)
-
-
-
-
+'''
 
 
 class GelSightRawMJPEGRecorder:
@@ -369,7 +266,7 @@ class GelSightCPURAMsaverRecorder:
             next_time = time.perf_counter()
 
             while self._running:
-                now_ns = time.perf_counter_ns()
+                now_ns = int(time.perf_counter() * 1e9)
                 t_ns = now_ns - session_t0_ns
 
                 writer.writerow(
