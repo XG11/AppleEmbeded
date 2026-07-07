@@ -3,10 +3,10 @@ import time
 import csv
 import struct
 from datetime import datetime
-
 from smbus2 import SMBus, i2c_msg
 
-def perf_counter_ns():
+
+def now_ns():
     return int(time.perf_counter() * 1e9)
 
 
@@ -15,7 +15,6 @@ class IMUFIFORecorder:
     BUS = 1
 
     WHO_AM_I = 0x0F
-
     CTRL1_XL = 0x10
     CTRL2_G = 0x11
     CTRL3_C = 0x12
@@ -30,13 +29,8 @@ class IMUFIFORecorder:
     FIFO_STATUS2 = 0x3B
     FIFO_DATA_OUT_TAG = 0x78
 
-    # CTRL1_XL = 0x8C -> accel ±8g
-    # Datasheet: ±8g = 0.244 mg/LSB
-    ACCEL_SCALE = 0.000244  # g/LSB
-
-    # CTRL2_G = 0x8C -> gyro ±2000 dps
-    # Datasheet: ±2000 dps = 70 mdps/LSB
-    GYRO_SCALE = 0.07  # dps/LSB
+    ACCEL_SCALE = 0.000244  # g/LSB for ±8g
+    GYRO_SCALE = 0.07       # dps/LSB for ±2000 dps
 
     def __init__(self, output_csv, duration_sec=30):
         self.output_csv = output_csv
@@ -64,13 +58,13 @@ class IMUFIFORecorder:
         print("WHO_AM_I:", hex(who))
 
         if who != 0x6C:
-            raise RuntimeError(f"Unexpected WHO_AM_I: {hex(who)}, expected 0x6c")
+            raise RuntimeError("Unexpected WHO_AM_I: {}".format(hex(who)))
 
-        # Software reset
+        # Reset
         self.write_reg(bus, self.CTRL3_C, 0x01)
         time.sleep(0.1)
 
-        # BDU = 1, IF_INC = 1
+        # BDU=1, IF_INC=1
         self.write_reg(bus, self.CTRL3_C, 0x44)
 
         # Accel: ODR 1.666 kHz, ±8g
@@ -79,25 +73,26 @@ class IMUFIFORecorder:
         # Gyro: ODR 1.666 kHz, ±2000 dps
         self.write_reg(bus, self.CTRL2_G, 0x8C)
 
-        # FIFO watermark low/high
+        # FIFO watermark = 255 samples
         self.write_reg(bus, self.FIFO_CTRL1, 255)
         self.write_reg(bus, self.FIFO_CTRL2, 0x00)
 
-        # FIFO batch rates:
-        # accel batch = same style as gyro, based on your previous working config
+        # Batch accel + gyro into FIFO
         self.write_reg(bus, self.FIFO_CTRL3, 0x88)
 
         # FIFO continuous mode
         self.write_reg(bus, self.FIFO_CTRL4, 0x06)
 
-        # Optional FIFO threshold interrupt on INT1
+        # FIFO threshold interrupt on INT1, optional
         self.write_reg(bus, self.INT1_CTRL, 0x08)
 
     def run(self, session_t0_ns=None):
         if session_t0_ns is None:
-            session_t0_ns = time.perf_counter_ns()
+            session_t0_ns = now_ns()
 
-        os.makedirs(os.path.dirname(self.output_csv), exist_ok=True)
+        out_dir = os.path.dirname(self.output_csv)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
 
         with SMBus(self.BUS) as bus:
             self.configure_sensor(bus)
@@ -121,7 +116,7 @@ class IMUFIFORecorder:
                     n_samples = min(level, 255)
                     raw = self.read_fifo_bytes(bus, n_samples * 7)
 
-                    t_ns = time.perf_counter_ns()
+                    t_ns = now_ns()
                     t_ms = (t_ns - session_t0_ns) / 1e6
 
                     for i in range(0, len(raw), 7):
@@ -133,9 +128,7 @@ class IMUFIFORecorder:
 
                         if tag == 0x02:
                             writer.writerow([
-                                t_ns,
-                                t_ms,
-                                "accel",
+                                t_ns, t_ms, "accel",
                                 x * self.ACCEL_SCALE,
                                 y * self.ACCEL_SCALE,
                                 z * self.ACCEL_SCALE,
@@ -145,9 +138,7 @@ class IMUFIFORecorder:
 
                         elif tag == 0x01:
                             writer.writerow([
-                                t_ns,
-                                t_ms,
-                                "gyro",
+                                t_ns, t_ms, "gyro",
                                 x * self.GYRO_SCALE,
                                 y * self.GYRO_SCALE,
                                 z * self.GYRO_SCALE,
@@ -176,7 +167,7 @@ if __name__ == "__main__":
         duration_sec=DURATION_SEC,
     )
 
-    session_t0_ns = time.perf_counter_ns()
+    session_t0_ns = now_ns()
     recorder.run(session_t0_ns=session_t0_ns)
 
     print("Saved:", output_csv)
