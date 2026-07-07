@@ -1,8 +1,10 @@
+import os
 import time
 import csv
 import struct
+from datetime import datetime
+
 from smbus2 import SMBus, i2c_msg
-from gpiozero import Button
 
 
 class IMUFIFORecorder:
@@ -10,6 +12,7 @@ class IMUFIFORecorder:
     BUS = 1
 
     WHO_AM_I = 0x0F
+
     CTRL1_XL = 0x10
     CTRL2_G = 0x11
     CTRL3_C = 0x12
@@ -24,8 +27,13 @@ class IMUFIFORecorder:
     FIFO_STATUS2 = 0x3B
     FIFO_DATA_OUT_TAG = 0x78
 
-    ACCEL_SCALE = 0.000976 / 2  # g/LSB for your current setup
-    GYRO_SCALE = 0.07
+    # CTRL1_XL = 0x8C -> accel ±8g
+    # Datasheet: ±8g = 0.244 mg/LSB
+    ACCEL_SCALE = 0.000244  # g/LSB
+
+    # CTRL2_G = 0x8C -> gyro ±2000 dps
+    # Datasheet: ±2000 dps = 70 mdps/LSB
+    GYRO_SCALE = 0.07  # dps/LSB
 
     def __init__(self, output_csv, duration_sec=30):
         self.output_csv = output_csv
@@ -48,30 +56,48 @@ class IMUFIFORecorder:
         s2 = self.read_reg(bus, self.FIFO_STATUS2)
         return s1 | ((s2 & 0x03) << 8)
 
-    def run(self, session_t0_ns):
+    def configure_sensor(self, bus):
+        who = self.read_reg(bus, self.WHO_AM_I)
+        print("WHO_AM_I:", hex(who))
 
-        fifo_int = Button(17, pull_up = False)
+        if who != 0x6C:
+            raise RuntimeError(f"Unexpected WHO_AM_I: {hex(who)}, expected 0x6c")
+
+        # Software reset
+        self.write_reg(bus, self.CTRL3_C, 0x01)
+        time.sleep(0.1)
+
+        # BDU = 1, IF_INC = 1
+        self.write_reg(bus, self.CTRL3_C, 0x44)
+
+        # Accel: ODR 1.666 kHz, ±8g
+        self.write_reg(bus, self.CTRL1_XL, 0x8C)
+
+        # Gyro: ODR 1.666 kHz, ±2000 dps
+        self.write_reg(bus, self.CTRL2_G, 0x8C)
+
+        # FIFO watermark low/high
+        self.write_reg(bus, self.FIFO_CTRL1, 255)
+        self.write_reg(bus, self.FIFO_CTRL2, 0x00)
+
+        # FIFO batch rates:
+        # accel batch = same style as gyro, based on your previous working config
+        self.write_reg(bus, self.FIFO_CTRL3, 0x88)
+
+        # FIFO continuous mode
+        self.write_reg(bus, self.FIFO_CTRL4, 0x06)
+
+        # Optional FIFO threshold interrupt on INT1
+        self.write_reg(bus, self.INT1_CTRL, 0x08)
+
+    def run(self, session_t0_ns=None):
+        if session_t0_ns is None:
+            session_t0_ns = time.perf_counter_ns()
+
+        os.makedirs(os.path.dirname(self.output_csv), exist_ok=True)
 
         with SMBus(self.BUS) as bus:
-            who = self.read_reg(bus, self.WHO_AM_I)
-            print("WHO_AM_I:", hex(who))
-
-            self.write_reg(bus, self.CTRL3_C, 0x01)
-            time.sleep(0.1)
-
-            self.write_reg(bus, self.CTRL3_C, 0x44)
-
-            self.write_reg(bus, self.CTRL1_XL, 0x8C)
-            self.write_reg(bus, self.CTRL2_G, 0x8C)
-
-            self.write_reg(bus, self.FIFO_CTRL1, 255)
-            self.write_reg(bus, self.FIFO_CTRL2, 0x00)
-
-            self.write_reg(bus, self.FIFO_CTRL3, 0x88)
-            self.write_reg(bus, self.FIFO_CTRL4, 0x06)
-
-            self.write_reg(bus, self.INT1_CTRL, 0X08)
-
+            self.configure_sensor(bus)
             print("FIFO started")
 
             start_time = time.perf_counter()
@@ -83,12 +109,9 @@ class IMUFIFORecorder:
                 writer.writerow(["t_ns", "t_ms", "sensor", "x", "y", "z", "unit"])
 
                 while time.perf_counter() - start_time < self.duration_sec:
-
-                    fifo_int.wait_for_press(timeout=0.1)
-                    #print("INT!")
+                    time.sleep(0.005)
 
                     level = self.fifo_level(bus)
-
                     if level == 0:
                         continue
 
@@ -99,6 +122,9 @@ class IMUFIFORecorder:
                     t_ms = (t_ns - session_t0_ns) / 1e6
 
                     for i in range(0, len(raw), 7):
+                        if i + 7 > len(raw):
+                            break
+
                         tag = raw[i] >> 3
                         x, y, z = struct.unpack_from("<hhh", raw, i + 1)
 
@@ -107,12 +133,10 @@ class IMUFIFORecorder:
                                 t_ns,
                                 t_ms,
                                 "accel",
-                                #round(x * self.ACCEL_SCALE, 2),
-                                #round(y * self.ACCEL_SCALE, 2),
-                                #round(z * self.ACCEL_SCALE, 2),
                                 x * self.ACCEL_SCALE,
                                 y * self.ACCEL_SCALE,
-                                z * self.ACCEL_SCALE
+                                z * self.ACCEL_SCALE,
+                                "g",
                             ])
                             count += 1
 
@@ -121,17 +145,12 @@ class IMUFIFORecorder:
                                 t_ns,
                                 t_ms,
                                 "gyro",
-                                #round(x * self.GYRO_SCALE, 2),
-                                #round(y * self.GYRO_SCALE, 2),
-                                #round(z * self.GYRO_SCALE, 2),
                                 x * self.GYRO_SCALE,
                                 y * self.GYRO_SCALE,
                                 z * self.GYRO_SCALE,
-                                "dps"
-                        
+                                "dps",
                             ])
                             count += 1
-
 
                     now = time.perf_counter()
                     if now - last_print >= 1.0:
@@ -139,4 +158,22 @@ class IMUFIFORecorder:
                         count = 0
                         last_print = now
 
-            print("Done recording IMU.")
+        print("Done recording IMU.")
+
+
+if __name__ == "__main__":
+    DURATION_SEC = 30
+
+    session_name = datetime.now().strftime("session_%Y%m%d_%H%M%S")
+    session_dir = os.path.join(os.getcwd(), session_name)
+    output_csv = os.path.join(session_dir, "imu_fifo_i2c.csv")
+
+    recorder = IMUFIFORecorder(
+        output_csv=output_csv,
+        duration_sec=DURATION_SEC,
+    )
+
+    session_t0_ns = time.perf_counter_ns()
+    recorder.run(session_t0_ns=session_t0_ns)
+
+    print("Saved:", output_csv)
