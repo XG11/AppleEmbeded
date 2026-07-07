@@ -2,7 +2,7 @@ import spidev
 import time
 
 spi = spidev.SpiDev()
-spi.open(0,0)
+spi.open(1,0)
 spi.max_speed_hz = 100000
 spi.mode = 3
 
