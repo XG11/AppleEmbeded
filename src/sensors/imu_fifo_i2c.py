@@ -135,7 +135,7 @@ class IMUFIFORecorder:
                                 "g",
                             ])
                             count += 1
-
+                        '''
                         elif tag == 0x01:
                             writer.writerow([
                                 t_ns, t_ms, "gyro",
@@ -145,7 +145,7 @@ class IMUFIFORecorder:
                                 "dps",
                             ])
                             count += 1
-
+                        '''
                     now = time.perf_counter()
                     if now - last_print >= 1.0:
                         print("FIFO samples/sec:", count)
