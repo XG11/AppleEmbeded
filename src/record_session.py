@@ -9,7 +9,7 @@ from sensors.imu_fifo_SPI import IMUSPIFIFORecorder
 from sensors.camera_recorder import GelSightCPURAMsaverRecorder
 
 
-DURATION_SEC = 15
+DURATION_SEC = 60
 
 
 def main():
@@ -67,10 +67,10 @@ def main():
     print("Recording to:", session_dir)
 
     imu_thread.start()
-    cam_thread.start()
+    #cam_thread.start()
 
     imu_thread.join()
-    cam_thread.join()
+    #cam_thread.join()
 
     print("Done.")
     print("Saved:", session_dir)
