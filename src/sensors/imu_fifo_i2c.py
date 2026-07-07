@@ -71,7 +71,7 @@ class IMUFIFORecorder:
         self.write_reg(bus, self.CTRL1_XL, 0x8C)
 
         # Gyro: ODR 1.666 kHz, ±2000 dps
-        self.write_reg(bus, self.CTRL2_G, 0x8C)
+        self.write_reg(bus, self.CTRL2_G, 0x00)
 
         # FIFO watermark = 255 samples
         self.write_reg(bus, self.FIFO_CTRL1, 255)
@@ -135,17 +135,17 @@ class IMUFIFORecorder:
                                 "g",
                             ])
                             count += 1
-                        '''
-                        elif tag == 0x01:
-                            writer.writerow([
-                                t_ns, t_ms, "gyro",
-                                x * self.GYRO_SCALE,
-                                y * self.GYRO_SCALE,
-                                z * self.GYRO_SCALE,
-                                "dps",
-                            ])
-                            count += 1
-                        '''
+                    
+                        #elif tag == 0x01:
+                        #    writer.writerow([
+                        #        t_ns, t_ms, "gyro",
+                        #        x * self.GYRO_SCALE,
+                        #        y * self.GYRO_SCALE,
+                        #        z * self.GYRO_SCALE,
+                        #        "dps",
+                        #    ])
+                        #    count += 1
+                    
                     now = time.perf_counter()
                     if now - last_print >= 1.0:
                         print("FIFO samples/sec:", count)
