@@ -2,7 +2,7 @@ import spidev
 import time
 
 spi = spidev.SpiDev()
-spi.open(0, 0)          # test /dev/spidev0.0 first
+spi.open(1, 0)          # test /dev/spidev0.0 first
 spi.max_speed_hz = 100000
 spi.mode = 0
 
