@@ -6,7 +6,7 @@ for bus, dev in [(0,0), (0,1), (1,0), (1,1)]:
     spi = spidev.SpiDev()
     spi.open(bus, dev)
     spi.max_speed_hz = 100000
-    spi.mode = 0
+    spi.mode = 3
 
     t0 = time.time()
     while time.time() - t0 < 10:
