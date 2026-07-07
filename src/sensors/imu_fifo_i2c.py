@@ -6,6 +6,9 @@ from datetime import datetime
 
 from smbus2 import SMBus, i2c_msg
 
+def perf_counter_ns():
+    return int(time.perf_counter() * 1e9)
+
 
 class IMUFIFORecorder:
     ADDR = 0x6A
