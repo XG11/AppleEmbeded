@@ -1,32 +1,46 @@
 #include <Arduino.h>
 #include "lsm6dso32.h"
 
-LSM6DSO32 imu(10);
+static constexpr uint8_t IMU_CS = 10;
+
+LSM6DSO32 imu(IMU_CS);
 
 void setup()
 {
     Serial.begin(115200);
-
-    while (!Serial)
-        ;
+    while (!Serial && millis() < 3000) {}
 
     Serial.println();
-    Serial.println("LSM6DSO32 Test");
+    Serial.println("LSM6DSO32 accel-only SPI test");
 
-    if (imu.begin())
+    if (!imu.begin())
     {
-        Serial.println("IMU Found!");
+        Serial.println("ERROR: IMU not found");
+        while (1)
+        {
+            delay(1000);
+        }
     }
-    else
-    {
-        Serial.println("WHO_AM_I failed");
-    }
+
+    Serial.println("IMU found: WHO_AM_I = 0x6C");
+
+    imu.configureAccel();
+
+    Serial.println("timestamp_us,ax_raw,ay_raw,az_raw");
 }
 
 void loop()
 {
-    delay(1000);
+    int16_t ax, ay, az;
+    imu.readAccelRaw(ax, ay, az);
 
-    Serial.print("WHO_AM_I = 0x");
-    Serial.println(imu.readRegister(0x0F), HEX);
+    Serial.print(micros());
+    Serial.print(",");
+    Serial.print(ax);
+    Serial.print(",");
+    Serial.print(ay);
+    Serial.print(",");
+    Serial.println(az);
+
+    delay(10);
 }
