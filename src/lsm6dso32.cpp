@@ -47,7 +47,7 @@ uint8_t LSM6DSO32::readRegister(uint8_t reg)
 
 void LSM6DSO32::writeRegister(uint8_t reg, uint8_t value)
 {
-    SPI.beginTransaction(SPISettings(SPI_SPEED, MSBFIRST, SPI_MODE3));
+    SPI.beginTransaction(SPISettings(SPI_SPEED, MSBFIRST, SPI_MODE0));
 
     digitalWrite(_cs, LOW);
     SPI.transfer(reg & 0x7F);
@@ -59,7 +59,7 @@ void LSM6DSO32::writeRegister(uint8_t reg, uint8_t value)
 
 void LSM6DSO32::readRegisters(uint8_t startReg, uint8_t *buffer, size_t len)
 {
-    SPI.beginTransaction(SPISettings(SPI_SPEED, MSBFIRST, SPI_MODE3));
+    SPI.beginTransaction(SPISettings(SPI_SPEED, MSBFIRST, SPI_MODE0));
 
     digitalWrite(_cs, LOW);
     SPI.transfer(startReg | 0x80);
