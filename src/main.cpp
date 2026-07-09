@@ -7,11 +7,11 @@ LSM6DSO32 imu(IMU_CS);
 
 void setup()
 {
-    Serial.begin(115200);
+    Serial.begin(921600);
     delay(1000);
 
     Serial.println();
-    Serial.println("LSM6DSO32 accel + gyro SPI test");
+    Serial.println("LSM6DSO32 FIFO accel + gyro test");
 
     if (!imu.begin())
     {
@@ -22,9 +22,7 @@ void setup()
         }
     }
 
-    Serial.println("IMU found");
-
-    imu.configureAccelGyro();
+    imu.configureFifoAccelGyro();
 
     Serial.print("CTRL1_XL = 0x");
     Serial.println(imu.readRegister(0x10), HEX);
@@ -32,33 +30,52 @@ void setup()
     Serial.print("CTRL2_G = 0x");
     Serial.println(imu.readRegister(0x11), HEX);
 
-    Serial.print("CTRL3_C = 0x");
-    Serial.println(imu.readRegister(0x12), HEX);
+    Serial.print("FIFO_CTRL3 = 0x");
+    Serial.println(imu.readRegister(0x09), HEX);
 
-    Serial.println("timestamp_us,ax_raw,ay_raw,az_raw,gx_raw,gy_raw,gz_raw");
+    Serial.print("FIFO_CTRL4 = 0x");
+    Serial.println(imu.readRegister(0x0A), HEX);
+
+    Serial.println("timestamp_us,type,x_raw,y_raw,z_raw,fifo_remaining");
 }
 
 void loop()
 {
-    int16_t ax, ay, az;
-    int16_t gx, gy, gz;
+    uint16_t count = imu.fifoCount();
 
-    imu.readAccelRaw(ax, ay, az);
-    imu.readGyroRaw(gx, gy, gz);
+    while (count > 0)
+    {
+        uint8_t tag;
+        int16_t x, y, z;
 
-    Serial.print(micros());
-    Serial.print(",");
-    Serial.print(ax);
-    Serial.print(",");
-    Serial.print(ay);
-    Serial.print(",");
-    Serial.print(az);
-    Serial.print(",");
-    Serial.print(gx);
-    Serial.print(",");
-    Serial.print(gy);
-    Serial.print(",");
-    Serial.println(gz);
+        imu.readFifoSample(tag, x, y, z);
 
-    delay(10);
+        Serial.print(micros());
+        Serial.print(",");
+
+        if (tag == 0x01)
+        {
+            Serial.print("gyro");
+        }
+        else if (tag == 0x02)
+        {
+            Serial.print("accel");
+        }
+        else
+        {
+            Serial.print("tag_");
+            Serial.print(tag);
+        }
+
+        Serial.print(",");
+        Serial.print(x);
+        Serial.print(",");
+        Serial.print(y);
+        Serial.print(",");
+        Serial.print(z);
+        Serial.print(",");
+        Serial.println(count);
+
+        count--;
+    }
 }

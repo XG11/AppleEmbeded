@@ -1,16 +1,23 @@
 #include "lsm6dso32.h"
 
-static constexpr uint32_t SPI_SPEED = 100000;
+static constexpr uint32_t SPI_SPEED = 1000000;
 
 // Registers
 static constexpr uint8_t WHO_AM_I = 0x0F;
+
+static constexpr uint8_t FIFO_CTRL1 = 0x07;
+static constexpr uint8_t FIFO_CTRL2 = 0x08;
+static constexpr uint8_t FIFO_CTRL3 = 0x09;
+static constexpr uint8_t FIFO_CTRL4 = 0x0A;
 
 static constexpr uint8_t CTRL1_XL = 0x10;
 static constexpr uint8_t CTRL2_G  = 0x11;
 static constexpr uint8_t CTRL3_C  = 0x12;
 
-static constexpr uint8_t OUTX_L_G = 0x22;
-static constexpr uint8_t OUTX_L_A = 0x28;
+static constexpr uint8_t FIFO_STATUS1 = 0x3A;
+static constexpr uint8_t FIFO_STATUS2 = 0x3B;
+
+static constexpr uint8_t FIFO_DATA_OUT_TAG = 0x78;
 
 LSM6DSO32::LSM6DSO32(uint8_t csPin)
 {
@@ -44,7 +51,6 @@ uint8_t LSM6DSO32::readRegister(uint8_t reg)
     digitalWrite(_cs, HIGH);
 
     SPI.endTransaction();
-
     return value;
 }
 
@@ -77,43 +83,65 @@ void LSM6DSO32::readRegisters(uint8_t startReg, uint8_t *buffer, size_t len)
     SPI.endTransaction();
 }
 
-void LSM6DSO32::configureAccelGyro()
+void LSM6DSO32::configureFifoAccelGyro()
 {
+    // Reset FIFO first: bypass mode
+    writeRegister(FIFO_CTRL4, 0x00);
+    delay(10);
+
     // CTRL3_C:
     // BDU = 1, IF_INC = 1
     writeRegister(CTRL3_C, 0x44);
 
-    // CTRL1_XL:
-    // ODR_XL = 6.66 kHz
-    // FS_XL = ±32 g
-    writeRegister(CTRL1_XL, 0xA8);
+    // Debug ODR:
+    // 0x60 = 416 Hz accel, FS = ±32g
+    // 0x6C = 416 Hz gyro,  FS = 2000 dps
+    //
+    // Later for 6.66 kHz:
+    // CTRL1_XL = 0xA8
+    // CTRL2_G  = 0xAC
+    writeRegister(CTRL1_XL, 0x68);
+    writeRegister(CTRL2_G,  0x6C);
 
-    // CTRL2_G:
-    // ODR_G = 6.66 kHz
-    // FS_G = 2000 dps
-    writeRegister(CTRL2_G, 0xAC);
+    // FIFO watermark low/high.
+    // For now, not using interrupt watermark, so set low value.
+    writeRegister(FIFO_CTRL1, 0x20);
+    writeRegister(FIFO_CTRL2, 0x00);
+
+    // FIFO_CTRL3:
+    // BDR_G  = 416 Hz
+    // BDR_XL = 416 Hz
+    //
+    // 0x66 = gyro FIFO batch rate 416 Hz + accel FIFO batch rate 416 Hz
+    writeRegister(FIFO_CTRL3, 0x66);
+
+    // FIFO_CTRL4:
+    // continuous FIFO mode
+    writeRegister(FIFO_CTRL4, 0x06);
 
     delay(50);
 }
 
-void LSM6DSO32::readAccelRaw(int16_t &ax, int16_t &ay, int16_t &az)
+uint16_t LSM6DSO32::fifoCount()
 {
-    uint8_t data[6];
+    uint8_t st1 = readRegister(FIFO_STATUS1);
+    uint8_t st2 = readRegister(FIFO_STATUS2);
 
-    readRegisters(OUTX_L_A, data, 6);
-
-    ax = (int16_t)((data[1] << 8) | data[0]);
-    ay = (int16_t)((data[3] << 8) | data[2]);
-    az = (int16_t)((data[5] << 8) | data[4]);
+    return (uint16_t)(st1 | ((st2 & 0x03) << 8));
 }
 
-void LSM6DSO32::readGyroRaw(int16_t &gx, int16_t &gy, int16_t &gz)
+bool LSM6DSO32::readFifoSample(uint8_t &tag, int16_t &x, int16_t &y, int16_t &z)
 {
-    uint8_t data[6];
+    uint8_t data[7];
 
-    readRegisters(OUTX_L_G, data, 6);
+    readRegisters(FIFO_DATA_OUT_TAG, data, 7);
 
-    gx = (int16_t)((data[1] << 8) | data[0]);
-    gy = (int16_t)((data[3] << 8) | data[2]);
-    gz = (int16_t)((data[5] << 8) | data[4]);
-};
+    // FIFO tag is usually in upper bits
+    tag = (data[0] >> 3) & 0x1F;
+
+    x = (int16_t)((data[2] << 8) | data[1]);
+    y = (int16_t)((data[4] << 8) | data[3]);
+    z = (int16_t)((data[6] << 8) | data[5]);
+
+    return true;
+}
