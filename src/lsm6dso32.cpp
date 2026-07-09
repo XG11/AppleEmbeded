@@ -1,12 +1,16 @@
 #include "lsm6dso32.h"
 
-static constexpr uint32_t SPI_SPEED = 1000000;
+static constexpr uint32_t SPI_SPEED = 100000;
 
 // Registers
 static constexpr uint8_t WHO_AM_I = 0x0F;
-static constexpr uint8_t CTRL1_XL  = 0x10;
-static constexpr uint8_t CTRL3_C   = 0x12;
-static constexpr uint8_t OUTX_L_A  = 0x28;
+
+static constexpr uint8_t CTRL1_XL = 0x10;
+static constexpr uint8_t CTRL2_G  = 0x11;
+static constexpr uint8_t CTRL3_C  = 0x12;
+
+static constexpr uint8_t OUTX_L_G = 0x22;
+static constexpr uint8_t OUTX_L_A = 0x28;
 
 LSM6DSO32::LSM6DSO32(uint8_t csPin)
 {
@@ -24,8 +28,7 @@ bool LSM6DSO32::begin()
     uint8_t who = readRegister(WHO_AM_I);
 
     Serial.print("WHO_AM_I = 0x");
-    if (who < 0x10)
-        Serial.print("0");
+    if (who < 0x10) Serial.print("0");
     Serial.println(who, HEX);
 
     return who == 0x6C;
@@ -74,7 +77,7 @@ void LSM6DSO32::readRegisters(uint8_t startReg, uint8_t *buffer, size_t len)
     SPI.endTransaction();
 }
 
-void LSM6DSO32::configureAccel()
+void LSM6DSO32::configureAccelGyro()
 {
     // CTRL3_C:
     // BDU = 1, IF_INC = 1
@@ -83,10 +86,12 @@ void LSM6DSO32::configureAccel()
     // CTRL1_XL:
     // ODR_XL = 6.66 kHz
     // FS_XL = ±32 g
-    // LPF2 disabled
-    //
-    // 0xA8 = 1010 1000
     writeRegister(CTRL1_XL, 0xA8);
+
+    // CTRL2_G:
+    // ODR_G = 6.66 kHz
+    // FS_G = 2000 dps
+    writeRegister(CTRL2_G, 0xAC);
 
     delay(50);
 }
@@ -101,3 +106,14 @@ void LSM6DSO32::readAccelRaw(int16_t &ax, int16_t &ay, int16_t &az)
     ay = (int16_t)((data[3] << 8) | data[2]);
     az = (int16_t)((data[5] << 8) | data[4]);
 }
+
+void LSM6DSO32::readGyroRaw(int16_t &gx, int16_t &gy, int16_t &gz)
+{
+    uint8_t data[6];
+
+    readRegisters(OUTX_L_G, data, 6);
+
+    gx = (int16_t)((data[1] << 8) | data[0]);
+    gy = (int16_t)((data[3] << 8) | data[2]);
+    gz = (int16_t)((data[5] << 8) | data[4]);
+};
