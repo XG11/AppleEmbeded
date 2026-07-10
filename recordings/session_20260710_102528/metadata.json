@@ -1,0 +1,16 @@
+{
+  "session_name": "session_20260710_102528",
+  "wall_start_iso": "2026-07-10T10:25:30.414248-05:00",
+  "host_monotonic_start_ns": 143135474175208,
+  "requested_duration_s": 30.0,
+  "serial_port": "/dev/cu.usbmodem150585901",
+  "serial_baud": 921600,
+  "camera_index": 0,
+  "requested_camera_width": 0,
+  "requested_camera_height": 0,
+  "requested_camera_fps": 30.0,
+  "audio_device_index": 2,
+  "audio_sample_rate_hz": 48000,
+  "audio_channels": 1,
+  "audio_block_size": 1024
+}
