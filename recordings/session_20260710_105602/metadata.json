@@ -1,0 +1,25 @@
+{
+  "session_name": "session_20260710_105602",
+  "wall_start_iso": "2026-07-10T10:56:04.024347-05:00",
+  "host_monotonic_start_ns": 144969082043500,
+  "requested_duration_s": 30.0,
+  "imu": {
+    "serial_port": "/dev/cu.usbmodem150585901",
+    "baud_rate": 921600
+  },
+  "gelsight": {
+    "camera_index": 0,
+    "requested_width": 0,
+    "requested_height": 0,
+    "requested_fps": 30.0,
+    "actual_width": 1920,
+    "actual_height": 1080,
+    "actual_fps": 30.0
+  },
+  "microphone": {
+    "device_index": null,
+    "sample_rate_hz": 48000,
+    "channels": 1,
+    "block_size": 1024
+  }
+}
