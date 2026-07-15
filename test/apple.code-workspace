@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": "../../../../../PlatformIO/Projects/apple"
+		},
+		{
+			"name": "sensing_device",
+			"path": ".."
+		}
+	],
+	"settings": {}
+}
