@@ -1,6 +1,6 @@
 #include "lsm6dso32.h"
 
-static constexpr uint32_t SPI_SPEED = 1000000;
+static constexpr uint32_t SPI_SPEED = 10000000;
 
 // Registers
 static constexpr uint8_t WHO_AM_I = 0x0F;
@@ -100,8 +100,8 @@ void LSM6DSO32::configureFifoAccelGyro()
     // Later for 6.66 kHz:
     // CTRL1_XL = 0xA8
     // CTRL2_G  = 0xAC
-    writeRegister(CTRL1_XL, 0x68);
-    writeRegister(CTRL2_G,  0x6C);
+    writeRegister(CTRL1_XL, 0xA4);
+    writeRegister(CTRL2_G,  0xAC);
 
     // FIFO watermark low/high.
     // For now, not using interrupt watermark, so set low value.
@@ -113,7 +113,7 @@ void LSM6DSO32::configureFifoAccelGyro()
     // BDR_XL = 416 Hz
     //
     // 0x66 = gyro FIFO batch rate 416 Hz + accel FIFO batch rate 416 Hz
-    writeRegister(FIFO_CTRL3, 0x66);
+    writeRegister(FIFO_CTRL3, 0xAA);
 
     // FIFO_CTRL4:
     // continuous FIFO mode

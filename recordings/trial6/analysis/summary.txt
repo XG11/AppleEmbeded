@@ -1,0 +1,65 @@
+MULTIMODAL RECORDING ANALYSIS
+======================================================================
+
+Input files
+  IMU: /Users/xiaoruigu/Documents/PlatformIO/Projects/sensing_device/recordings/trial6/imu.csv
+  Audio: /Users/xiaoruigu/Documents/PlatformIO/Projects/sensing_device/recordings/trial6/microphone.wav
+  Audio timestamp: /Users/xiaoruigu/Documents/PlatformIO/Projects/sensing_device/recordings/trial6/microphone_timestamps.csv
+  GelSight video: /Users/xiaoruigu/Documents/PlatformIO/Projects/sensing_device/recordings/trial6/gelsight.avi
+  GelSight timestamp: /Users/xiaoruigu/Documents/PlatformIO/Projects/sensing_device/recordings/trial6/gelsight_timestamps.csv
+
+Shared reference timestamp: 131786.651823541 s
+
+Accelerometer
+  Samples: 390133
+  Duration: 60.031859 s
+  Mean sampling rate: 6498.749 Hz
+  Median sampling rate: 6389.776 Hz
+  Median interval: 156.500 us
+  Timing jitter standard deviation: 30.709 us
+  Gaps greater than 1.5x median interval: 1997
+
+Gyroscope
+  Samples: 390133
+  Duration: 60.031918 s
+  Mean sampling rate: 6498.743 Hz
+  Median sampling rate: 6391.450 Hz
+  Median interval: 156.459 us
+  Timing jitter standard deviation: 28.754 us
+  Gaps greater than 1.5x median interval: 1950
+
+GelSight timestamps
+  Samples: 1126
+  Duration: 59.988427 s
+  Mean sampling rate: 18.754 Hz
+  Median sampling rate: 18.753 Hz
+  Median interval: 53323.833 us
+  Timing jitter standard deviation: 120.466 us
+  Gaps greater than 1.5x median interval: 0
+
+Audio
+  Sample rate: 48000 Hz
+  Samples: 2879488
+  Duration: 59.989333 s
+  Recorded start timestamp: 131786.706212875
+
+GelSight video
+  Resolution: 3280 x 2464
+  FPS reported by AVI: 25.000000
+  Frames reported by AVI: 1126
+  Timestamp rows: 1126
+  Frames processed for motion: 1126
+
+Detected candidate contact events
+  Event 01: 0.846074 s from shared reference
+  Event 02: 1.208991 s from shared reference
+  Event 03: 1.845090 s from shared reference
+  Event 04: 7.304404 s from shared reference
+  Event 05: 9.270714 s from shared reference
+  Event 06: 17.483641 s from shared reference
+  Event 07: 18.906490 s from shared reference
+  Event 08: 21.136099 s from shared reference
+  Event 09: 23.149280 s from shared reference
+  Event 10: 23.706537 s from shared reference
+  Event 11: 41.719362 s from shared reference
+  Event 12: 43.409535 s from shared reference
