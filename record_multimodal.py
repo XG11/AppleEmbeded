@@ -12,8 +12,15 @@ from serial.tools import list_ports
 from recorder import RecordingSession
 
 
-def find_teensy_port() -> Optional[str]:
+from typing import List
+
+
+def find_teensy_ports() -> List[str]:
+
+    ports = []
+
     for port in list_ports.comports():
+
         description = (port.description or "").lower()
         manufacturer = (port.manufacturer or "").lower()
 
@@ -22,9 +29,9 @@ def find_teensy_port() -> Optional[str]:
             or "teensy" in manufacturer
             or port.vid == 0x16C0
         ):
-            return port.device
+            ports.append(port.device)
 
-    return None
+    return ports
 
 
 def list_serial_devices() -> None:
@@ -108,19 +115,29 @@ def parse_arguments():
     )
 
     parser.add_argument(
-        "--serial-port",
+    "--imu-port",
+    type=str,
+    default=None,
+    help="Serial port for IMU Teensy.",
+)
+
+    parser.add_argument(
+        "--piezo-port",
         type=str,
         default=None,
-        help=(
-            "Teensy serial port. "
-            "Automatically detected when omitted."
-        ),
+        help="Serial port for Piezo Teensy.",
     )
 
     parser.add_argument(
-        "--baud",
+        "--imu-baud",
         type=int,
-        default=921600,
+        default=2000000,
+    )
+
+    parser.add_argument(
+        "--piezo-baud",
+        type=int,
+        default=2000000,
     )
 
     parser.add_argument(
@@ -205,29 +222,42 @@ def main() -> None:
         list_cameras(args.camera_probe_count)
         return
 
-    serial_port = args.serial_port
+    imu_port = args.imu_port
+    piezo_port = args.piezo_port
 
-    if serial_port is None:
-        serial_port = find_teensy_port()
+    if imu_port is None or piezo_port is None:
 
-    if serial_port is None:
-        raise RuntimeError(
-            "Could not automatically find the Teensy. "
-            "Use --serial-port."
-        )
+        teensys = find_teensy_ports()
+
+        if len(teensys) != 2:
+
+            raise RuntimeError(
+                f"Expected 2 Teensys, found {len(teensys)}.\n"
+                "Please specify --imu-port and --piezo-port."
+            )
+
+        imu_port = teensys[0]
+        piezo_port = teensys[1]
 
     session = RecordingSession(
+
         duration_s=args.duration,
-        imu_port=serial_port,
-        imu_baud=args.baud,
+
+        imu_port=imu_port,
+        imu_baud=args.imu_baud,
+
+        piezo_port=piezo_port,
+
         camera_index=args.camera,
         camera_width=args.width,
         camera_height=args.height,
         camera_fps=args.fps,
-        audio_device=args.audio_device,
-        audio_sample_rate=args.audio_rate,
-        audio_channels=args.audio_channels,
-        audio_block_size=args.audio_block_size,
+
+        rode_audio_device=args.audio_device,
+        rode_sample_rate=args.audio_rate,
+        rode_channels=args.audio_channels,
+        rode_block_size=args.audio_block_size,
+
         output_root=args.output_root,
     )
 

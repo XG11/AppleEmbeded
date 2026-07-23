@@ -1,0 +1,33 @@
+{
+  "session_name": "session_20260719_103813",
+  "wall_start_iso": "2026-07-19T10:38:15.845949-05:00",
+  "host_monotonic_start_ns": 217611887307541,
+  "requested_duration_s": 60.0,
+  "imu": {
+    "serial_port": "/dev/cu.usbmodem201104101",
+    "baud_rate": 2000000
+  },
+  "gelsight": {
+    "camera_index": 0,
+    "requested_width": 3280,
+    "requested_height": 2464,
+    "requested_fps": 25.0,
+    "actual_width": 1552,
+    "actual_height": 1552,
+    "actual_fps": 30.0
+  },
+  "rode_microphone": {
+    "device_index": 4,
+    "device_name": "R\u00d8DE VideoMic GO II",
+    "sample_rate_hz": 48000,
+    "channels": 1,
+    "block_size": 1024
+  },
+  "teensy_microphone": {
+    "device_index": 7,
+    "device_name": "Teensy MIDI_Audio",
+    "sample_rate_hz": 44100,
+    "channels": 2,
+    "block_size": 1024
+  }
+}
