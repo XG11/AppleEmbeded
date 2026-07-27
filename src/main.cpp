@@ -1,15 +1,30 @@
 #include <Arduino.h>
 
+#include "hx711_sensor.h"
 #include "lsm6dso32.h"
 
 
 // ---------------------------------------------------------------------
-// Hardware configuration
+// Hardware pins
 // ---------------------------------------------------------------------
 
 static constexpr uint8_t IMU_CS = 10;
 
+// Change these two pins if necessary.
+static constexpr uint8_t HX711_DATA_PIN = 6;
+static constexpr uint8_t HX711_CLOCK_PIN = 7;
+
+
+// ---------------------------------------------------------------------
+// Sensor objects
+// ---------------------------------------------------------------------
+
 LSM6DSO32 imu(IMU_CS);
+
+HX711Sensor loadCell(
+    HX711_DATA_PIN,
+    HX711_CLOCK_PIN
+);
 
 
 // ---------------------------------------------------------------------
@@ -21,11 +36,8 @@ static constexpr uint8_t FIFO_TAG_ACCEL = 0x02;
 
 
 // ---------------------------------------------------------------------
-// Pending paired sample
+// Pending paired IMU sample
 // ---------------------------------------------------------------------
-
-// These variables are static/global so that an unmatched accelerometer
-// or gyroscope sample is preserved between loop() iterations.
 
 static int16_t accelX = 0;
 static int16_t accelY = 0;
@@ -40,10 +52,10 @@ static bool haveGyro = false;
 
 
 // ---------------------------------------------------------------------
-// Print one complete IMU sample
+// Serial output
 // ---------------------------------------------------------------------
 
-void printImuSample(uint32_t timestampUs)
+void printSensorRow(uint32_t timestampUs)
 {
     Serial.print(timestampUs);
     Serial.print(',');
@@ -59,7 +71,19 @@ void printImuSample(uint32_t timestampUs)
     Serial.print(',');
     Serial.print(gyroY);
     Serial.print(',');
-    Serial.println(gyroZ);
+    Serial.print(gyroZ);
+    Serial.print(',');
+
+    // Before the first HX711 conversion is available, output zero.
+    // After that, repeat the latest reading on each IMU row.
+    if (loadCell.hasReading())
+    {
+        Serial.println(loadCell.latestRaw());
+    }
+    else
+    {
+        Serial.println(0);
+    }
 }
 
 
@@ -73,7 +97,11 @@ void setup()
     delay(1000);
 
     Serial.println();
-    Serial.println("LSM6DSO32 FIFO paired accel + gyro test");
+    Serial.println("LSM6DSO32 + HX711 acquisition");
+
+    // -----------------------------------------------------------------
+    // IMU initialization
+    // -----------------------------------------------------------------
 
     if (!imu.begin())
     {
@@ -87,24 +115,51 @@ void setup()
 
     imu.configureFifoAccelGyro();
 
-    // Print register values for startup diagnostics.
     Serial.print("CTRL1_XL = 0x");
-    Serial.println(imu.readRegister(0x10), HEX);
+    Serial.println(
+        imu.readRegister(0x10),
+        HEX
+    );
 
     Serial.print("CTRL2_G = 0x");
-    Serial.println(imu.readRegister(0x11), HEX);
+    Serial.println(
+        imu.readRegister(0x11),
+        HEX
+    );
 
     Serial.print("FIFO_CTRL3 = 0x");
-    Serial.println(imu.readRegister(0x09), HEX);
+    Serial.println(
+        imu.readRegister(0x09),
+        HEX
+    );
 
     Serial.print("FIFO_CTRL4 = 0x");
-    Serial.println(imu.readRegister(0x0A), HEX);
+    Serial.println(
+        imu.readRegister(0x0A),
+        HEX
+    );
 
+    // -----------------------------------------------------------------
+    // HX711 initialization
+    // -----------------------------------------------------------------
+
+    loadCell.begin();
+
+    Serial.print("HX711 data pin: ");
+    Serial.println(HX711_DATA_PIN);
+
+    Serial.print("HX711 clock pin: ");
+    Serial.println(HX711_CLOCK_PIN);
+
+    // -----------------------------------------------------------------
     // CSV header
+    // -----------------------------------------------------------------
+
     Serial.println(
         "timestamp_us,"
         "acc_x,acc_y,acc_z,"
-        "gyro_x,gyro_y,gyro_z"
+        "gyro_x,gyro_y,gyro_z,"
+        "load_cell_raw"
     );
 }
 
@@ -115,6 +170,13 @@ void setup()
 
 void loop()
 {
+    // Update the HX711 only when a conversion is ready.
+    //
+    // This does not wait for a new HX711 reading. The most recent value
+    // remains available while the next conversion is taking place.
+    loadCell.update();
+
+    // Read the current number of entries in the IMU FIFO.
     uint16_t count = imu.fifoCount();
 
     while (count > 0)
@@ -147,12 +209,13 @@ void loop()
             haveGyro = true;
         }
 
-        // Print only after both parts of the IMU sample are available.
+        // Print one row after both accelerometer and gyroscope samples
+        // have been received.
         if (haveAccel && haveGyro)
         {
             const uint32_t timestampUs = micros();
 
-            printImuSample(timestampUs);
+            printSensorRow(timestampUs);
 
             haveAccel = false;
             haveGyro = false;

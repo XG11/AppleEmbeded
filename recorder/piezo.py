@@ -43,6 +43,12 @@ class PiezoRecorder:
         if self.thread is not None:
             self.thread.join(timeout)
 
+    def is_alive(self) -> bool:
+        return (
+            self.thread is not None
+            and self.thread.is_alive()
+        )
+
     def _run(self):
 
         try:

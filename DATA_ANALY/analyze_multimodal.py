@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 """
 analyze_multimodal.py
 
@@ -14,6 +12,7 @@ Outputs:
         imu_time_series.png
         imu_sampling_diagnostics.png
         imu_spectrum.png
+        load_cell_time_series.png
         audio_overview.png
         audio_spectrogram.png
         gelsight_motion.png
@@ -306,21 +305,19 @@ GYRO_RADS_PER_LSB = np.deg2rad(GYRO_DPS_PER_LSB)
 
 def load_imu_csv(path):
     """
-    Load the paired Teensy IMU CSV format:
+    Load paired LSM6DSO32 and HX711 measurements.
 
-    host_time_ns,host_elapsed_s,teensy_time_us,
-    acc_x_raw,acc_y_raw,acc_z_raw,
-    gyro_x_raw,gyro_y_raw,gyro_z_raw
+    Expected CSV columns:
 
-    Accelerometer values are returned in m/s².
-    Gyroscope values are returned in rad/s.
+        host_time_ns,host_elapsed_s,teensy_time_us,
+        acc_x_raw,acc_y_raw,acc_z_raw,
+        gyro_x_raw,gyro_y_raw,gyro_z_raw,
+        load_cell_raw
     """
     df = pd.read_csv(path)
 
     if df.empty:
-        raise ValueError(
-            f"IMU file is empty: {path}"
-        )
+        raise ValueError(f"Sensor file is empty: {path}")
 
     required_columns = {
         "host_time_ns",
@@ -332,30 +329,18 @@ def load_imu_csv(path):
         "gyro_x_raw",
         "gyro_y_raw",
         "gyro_z_raw",
+        "load_cell_raw",
     }
 
-    missing_columns = required_columns.difference(
-        df.columns
-    )
+    missing_columns = required_columns.difference(df.columns)
 
     if missing_columns:
         raise ValueError(
-            f"Missing required IMU columns: "
-            f"{sorted(missing_columns)}\n"
+            f"Missing required columns: {sorted(missing_columns)}\n"
             f"Available columns: {list(df.columns)}"
         )
 
-    numeric_columns = [
-        "host_time_ns",
-        "host_elapsed_s",
-        "teensy_time_us",
-        "acc_x_raw",
-        "acc_y_raw",
-        "acc_z_raw",
-        "gyro_x_raw",
-        "gyro_y_raw",
-        "gyro_z_raw",
-    ]
+    numeric_columns = list(required_columns)
 
     for column in numeric_columns:
         df[column] = pd.to_numeric(
@@ -363,14 +348,13 @@ def load_imu_csv(path):
             errors="coerce",
         )
 
-    original_row_count = len(df)
+    original_count = len(df)
 
-    # Remove rows that contain missing or nonnumeric values.
     df = df.dropna(
         subset=numeric_columns
     ).copy()
 
-    sensor_columns = [
+    imu_columns = [
         "acc_x_raw",
         "acc_y_raw",
         "acc_z_raw",
@@ -379,39 +363,45 @@ def load_imu_csv(path):
         "gyro_z_raw",
     ]
 
-    # Validate all channels against the int16_t range.
-    valid_rows = np.ones(
-        len(df),
-        dtype=bool,
-    )
+    valid_rows = np.ones(len(df), dtype=bool)
 
-    for column in sensor_columns:
-        valid_rows &= df[column].between(
-            -32768,
-            32767,
-        ).to_numpy()
+    for column in imu_columns:
+        valid_rows &= (
+            df[column]
+            .between(-32768, 32767)
+            .to_numpy()
+        )
+
+    valid_rows &= (
+        df["load_cell_raw"]
+        .between(-8_388_608, 8_388_607)
+        .to_numpy()
+    )
 
     df = df.loc[valid_rows].copy()
 
-    rejected_row_count = original_row_count - len(df)
+    rejected_count = original_count - len(df)
 
     if df.empty:
         raise ValueError(
-            "No valid paired IMU rows remained "
-            "after numeric and int16 validation."
+            "No valid sensor rows remained after validation."
         )
 
-    # Ensure chronological order based on host timestamps.
     df = df.sort_values(
         "host_time_ns"
     ).reset_index(drop=True)
 
-    # The rest of analyze_multimodal.py uses absolute
-    # perf_counter time in seconds for synchronization.
     time_s = (
         df["host_time_ns"].to_numpy(dtype=float)
         * 1e-9
     )
+
+    load_cell_raw = df[
+        "load_cell_raw"
+    ].to_numpy(dtype=float)
+
+    # -1 corresponds to the invalid all-ones HX711 result you observed.
+    load_cell_raw[load_cell_raw == -1] = np.nan
 
     output = {
         "raw": df,
@@ -453,19 +443,58 @@ def load_imu_csv(path):
             "unit": "rad/s",
             "full_scale": "±2000 °/s",
         },
+
+        "load_cell": {
+            "time_s": time_s,
+            "raw": load_cell_raw,
+            "unit": "ADC counts",
+        },
     }
 
-    print(
-        f"Loaded {len(df):,} paired IMU samples."
+    print(f"Loaded {len(df):,} combined sensor rows.")
+
+    valid_load_cell_count = int(
+        np.sum(np.isfinite(load_cell_raw))
     )
 
-    if rejected_row_count:
+    print(
+        f"Valid load-cell rows: "
+        f"{valid_load_cell_count:,}/{len(df):,}"
+    )
+
+    if rejected_count:
         print(
-            f"Rejected {rejected_row_count:,} "
-            "invalid IMU rows."
+            f"Rejected {rejected_count:,} malformed rows."
         )
 
     return output
+
+def calibrate_load_cell(
+    load_cell,
+    zero_offset,
+    counts_per_newton,
+):
+    """
+    Convert HX711 raw counts into force in newtons.
+
+    force_n = (raw - zero_offset) / counts_per_newton
+    """
+    if counts_per_newton == 0:
+        raise ValueError(
+            "counts_per_newton cannot be zero."
+        )
+
+    raw = np.asarray(
+        load_cell["raw"],
+        dtype=float,
+    )
+
+    load_cell["force_n"] = (
+        raw - zero_offset
+    ) / counts_per_newton
+
+    load_cell["zero_offset"] = zero_offset
+    load_cell["counts_per_newton"] = counts_per_newton
 
 def add_vector_magnitude(data):
     if data is None:
@@ -973,6 +1002,68 @@ def plot_imu_spectrum(imu, output_path):
     fig.savefig(output_path, dpi=180)
     plt.close(fig)
 
+def plot_load_cell_time_series(
+    load_cell,
+    reference_s,
+    output_path,
+):
+    time_relative = make_relative_time(
+        load_cell["time_s"],
+        reference_s,
+    )
+
+    if "force_n" in load_cell:
+        values = np.asarray(
+            load_cell["force_n"],
+            dtype=float,
+        )
+        ylabel = "Force (N)"
+        title = "Load-cell force"
+    else:
+        values = np.asarray(
+            load_cell["raw"],
+            dtype=float,
+        )
+        ylabel = "HX711 output (ADC counts)"
+        title = "Load-cell raw output"
+
+    valid = (
+        np.isfinite(time_relative)
+        & np.isfinite(values)
+    )
+
+    if not np.any(valid):
+        warnings.warn(
+            "No valid HX711 samples were available for plotting."
+        )
+        return
+
+    plot_time, plot_values = downsample_for_plot(
+        time_relative[valid],
+        values[valid],
+        max_points=100_000,
+    )
+
+    fig, axis_plot = plt.subplots(
+        figsize=(14, 5)
+    )
+
+    axis_plot.plot(
+        plot_time,
+        plot_values,
+        linewidth=0.9,
+    )
+
+    axis_plot.set_title(title)
+    axis_plot.set_xlabel(
+        "Time from shared reference (s)"
+    )
+    axis_plot.set_ylabel(ylabel)
+    axis_plot.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
 
 def plot_audio(audio, reference_s, output_path):
     sample_rate = audio["sample_rate"]
@@ -1111,6 +1202,9 @@ def plot_synchronization_overview(
     if imu["gyro"] is not None:
         rows.append(("Gyroscope magnitude", "gyro"))
 
+    if imu.get("load_cell") is not None:
+        rows.append(("Load-cell signal", "load_cell"))
+
     rows.append(("Audio RMS envelope", "audio"))
     rows.append(("GelSight visual motion", "gelsight"))
 
@@ -1133,6 +1227,22 @@ def plot_synchronization_overview(
                 time_relative,
                 safe_normalize(data["magnitude"]),
             )
+
+        elif data_type == "load_cell":
+            load_cell = imu["load_cell"]
+
+            plot_time = make_relative_time(
+                load_cell["time_s"],
+                reference_s,
+            )
+
+            values = (
+                load_cell["force_n"]
+                if "force_n" in load_cell
+                else load_cell["raw"]
+            )
+
+            plot_values = safe_normalize(values)
 
         elif data_type == "audio":
             envelope_time, envelope = compute_audio_envelope(
@@ -1228,6 +1338,33 @@ def write_summary(
         )
         lines.append(format_statistics("Gyroscope", statistics))
 
+    if imu.get("load_cell") is not None:
+        load_cell = imu["load_cell"]
+        load_values = (
+            load_cell["force_n"]
+            if "force_n" in load_cell
+            else load_cell["raw"]
+        )
+        valid_load_values = np.asarray(load_values, dtype=float)
+        valid_load_values = valid_load_values[np.isfinite(valid_load_values)]
+
+        lines.append("Load cell")
+        lines.append(
+            f"  Valid rows: {len(valid_load_values)} / "
+            f"{len(load_cell['time_s'])}"
+        )
+
+        if len(valid_load_values) > 0:
+            unit = "N" if "force_n" in load_cell else "ADC counts"
+            lines.append(f"  Minimum: {np.min(valid_load_values):.6f} {unit}")
+            lines.append(f"  Maximum: {np.max(valid_load_values):.6f} {unit}")
+            lines.append(f"  Mean: {np.mean(valid_load_values):.6f} {unit}")
+            lines.append(f"  Standard deviation: {np.std(valid_load_values):.6f} {unit}")
+        else:
+            lines.append("  No valid HX711 values were available.")
+
+        lines.append("")
+
     video_statistics = estimate_sampling_statistics(
         gelsight_timestamps["time_s"]
     )
@@ -1280,7 +1417,7 @@ def write_summary(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Analyze synchronized GelSight, IMU, and audio data."
+        description="Analyze synchronized GelSight, IMU, HX711, and audio data."
     )
 
     parser.add_argument(
@@ -1313,7 +1450,36 @@ def main():
         help="Maximum number of automatically selected events.",
     )
 
+    parser.add_argument(
+        "--load-cell-zero",
+        type=float,
+        default=None,
+        help=(
+            "HX711 zero-load offset in raw ADC counts. "
+            "Use together with --load-cell-counts-per-newton."
+        ),
+    )
+
+    parser.add_argument(
+        "--load-cell-counts-per-newton",
+        type=float,
+        default=None,
+        help=(
+            "HX711 calibration factor in counts per newton. "
+            "Use together with --load-cell-zero."
+        ),
+    )
+
     args = parser.parse_args()
+
+    if (
+        (args.load_cell_zero is None)
+        != (args.load_cell_counts_per_newton is None)
+    ):
+        parser.error(
+            "--load-cell-zero and --load-cell-counts-per-newton "
+            "must be provided together."
+        )
 
     session_dir = args.session_dir.expanduser().resolve()
 
@@ -1361,7 +1527,7 @@ def main():
     required = {
         "GelSight AVI": video_path,
         "GelSight timestamp CSV": video_timestamp_path,
-        "IMU CSV": imu_path,
+        "IMU + HX711 CSV": imu_path,
         "audio WAV": audio_path,
     }
 
@@ -1379,7 +1545,7 @@ def main():
     print("Input files")
     print(f"  GelSight video:     {video_path.name}")
     print(f"  GelSight timestamp: {video_timestamp_path.name}")
-    print(f"  IMU:                {imu_path.name}")
+    print(f"  IMU + HX711:        {imu_path.name}")
     print(f"  Audio:              {audio_path.name}")
     print(
         f"  Audio timestamp:    "
@@ -1387,8 +1553,20 @@ def main():
     )
 
     # Load datasets.
-    print("\nLoading IMU...")
+    print("\nLoading IMU and load-cell data...")
     imu = load_imu_csv(imu_path)
+
+    if args.load_cell_zero is not None:
+        calibrate_load_cell(
+            imu["load_cell"],
+            zero_offset=args.load_cell_zero,
+            counts_per_newton=args.load_cell_counts_per_newton,
+        )
+        print(
+            "Applied load-cell calibration: "
+            f"zero={args.load_cell_zero}, "
+            f"counts_per_newton={args.load_cell_counts_per_newton}"
+        )
     add_vector_magnitude(imu["accel"])
     add_vector_magnitude(imu["gyro"])
 
@@ -1448,6 +1626,13 @@ def main():
     plot_imu_spectrum(
         imu,
         output_dir / "imu_spectrum.png",
+    )
+
+    print("Creating load-cell plot...")
+    plot_load_cell_time_series(
+        imu["load_cell"],
+        reference_s,
+        output_dir / "load_cell_time_series.png",
     )
 
     print("Creating audio plots...")
@@ -1557,6 +1742,7 @@ def main():
     print("\nImportant outputs:")
     print(f"  {output_dir / 'synchronization_overview.png'}")
     print(f"  {output_dir / 'imu_spectrum.png'}")
+    print(f"  {output_dir / 'load_cell_time_series.png'}")
     print(f"  {output_dir / 'audio_spectrogram.png'}")
     print(f"  {output_dir / 'gelsight_motion.png'}")
     print(f"  {output_dir / 'summary.txt'}")
