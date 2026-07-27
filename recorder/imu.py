@@ -10,12 +10,26 @@ from .shared import SharedRecordingState, monotonic_ns
 
 
 class IMURecorder:
+    """
+    Record paired LSM6DSO32 accelerometer and gyroscope samples.
+
+    Expected Teensy serial format:
+
+        timestamp_us,acc_x,acc_y,acc_z,gyro_x,gyro_y,gyro_z
+
+    Output CSV format:
+
+        host_time_ns,host_elapsed_s,teensy_time_us,
+        acc_x_raw,acc_y_raw,acc_z_raw,
+        gyro_x_raw,gyro_y_raw,gyro_z_raw
+    """
+
     def __init__(
         self,
         state: SharedRecordingState,
         serial_port: str,
         output_path: Path,
-        baud_rate: int = 921600,
+        baud_rate: int = 2_000_000,
         startup_delay_s: float = 1.5,
     ) -> None:
         self.state = state
@@ -27,9 +41,13 @@ class IMURecorder:
         self.ready_event = threading.Event()
         self.thread: Optional[threading.Thread] = None
 
+        # One row now contains both accel and gyro.
         self.sample_count = 0
+
+        # Retain these fields in case RecordingSession prints them.
         self.accel_count = 0
         self.gyro_count = 0
+
         self.invalid_line_count = 0
 
     def start(self) -> None:
@@ -45,7 +63,62 @@ class IMURecorder:
             self.thread.join(timeout=timeout)
 
     def is_alive(self) -> bool:
-        return self.thread is not None and self.thread.is_alive()
+        return (
+            self.thread is not None
+            and self.thread.is_alive()
+        )
+
+    @staticmethod
+    def _parse_line(line: str):
+        """
+        Parse and validate one paired IMU serial line.
+
+        Returns:
+            Tuple containing:
+                teensy_time_us,
+                acc_x_raw, acc_y_raw, acc_z_raw,
+                gyro_x_raw, gyro_y_raw, gyro_z_raw
+
+            Returns None for an invalid line.
+        """
+        line = line.strip()
+
+        if not line:
+            return None
+
+        fields = line.split(",")
+
+        # Require exactly seven fields.
+        #
+        # This is important. The previous code accepted any line with
+        # five or more fields, which could allow malformed records to
+        # enter the CSV.
+        if len(fields) != 7:
+            return None
+
+        try:
+            values = tuple(
+                int(field.strip())
+                for field in fields
+            )
+        except ValueError:
+            return None
+
+        teensy_time_us = values[0]
+        sensor_values = values[1:]
+
+        # Each IMU channel originates from an int16_t value.
+        if not all(
+            -32768 <= value <= 32767
+            for value in sensor_values
+        ):
+            return None
+
+        # micros() is an unsigned 32-bit timestamp.
+        if not 0 <= teensy_time_us <= 0xFFFFFFFF:
+            return None
+
+        return values
 
     def _run(self) -> None:
         try:
@@ -70,16 +143,20 @@ class IMURecorder:
                         "host_time_ns",
                         "host_elapsed_s",
                         "teensy_time_us",
-                        "type",
-                        "x_raw",
-                        "y_raw",
-                        "z_raw",
-                        "fifo_remaining",
+                        "acc_x_raw",
+                        "acc_y_raw",
+                        "acc_z_raw",
+                        "gyro_x_raw",
+                        "gyro_y_raw",
+                        "gyro_z_raw",
                     ]
                 )
 
-                # Teensy can reset when the serial connection opens.
+                # Opening a USB serial connection may reset the Teensy.
                 time.sleep(self.startup_delay_s)
+
+                # Remove startup messages such as WHO_AM_I and register
+                # diagnostics before recording begins.
                 serial_port.reset_input_buffer()
 
                 self.ready_event.set()
@@ -91,73 +168,66 @@ class IMURecorder:
                     if not raw_line:
                         continue
 
+                    # Record host reception time as soon as a complete
+                    # newline-delimited packet is received.
                     host_time_ns = monotonic_ns()
 
                     try:
                         line = raw_line.decode(
-                            "utf-8",
-                            errors="ignore",
-                        ).strip()
-
-                        if not line:
-                            continue
-
-                        fields = line.split(",")
-
-                        # Expected firmware output:
-                        #
-                        # timestamp_us,type,x_raw,y_raw,z_raw,fifo_remaining
-                        if len(fields) < 5:
-                            self.invalid_line_count += 1
-                            continue
-
-                        if not fields[0].isdigit():
-                            self.invalid_line_count += 1
-                            continue
-
-                        teensy_time_us = int(fields[0])
-                        sample_type = fields[1].strip()
-
-                        x_raw = int(fields[2])
-                        y_raw = int(fields[3])
-                        z_raw = int(fields[4])
-
-                        fifo_remaining = ""
-
-                        if len(fields) >= 6:
-                            fifo_remaining = fields[5].strip()
-
-                        host_elapsed_s = (
-                            host_time_ns - self.state.session_t0_ns
-                        ) / 1_000_000_000.0
-
-                        writer.writerow(
-                            [
-                                host_time_ns,
-                                f"{host_elapsed_s:.9f}",
-                                teensy_time_us,
-                                sample_type,
-                                x_raw,
-                                y_raw,
-                                z_raw,
-                                fifo_remaining,
-                            ]
+                            "ascii",
+                            errors="strict",
                         )
-
-                        self.sample_count += 1
-
-                        if sample_type == "accel":
-                            self.accel_count += 1
-                        elif sample_type == "gyro":
-                            self.gyro_count += 1
-
-                    except (ValueError, IndexError):
+                    except UnicodeDecodeError:
                         self.invalid_line_count += 1
+                        continue
+
+                    parsed = self._parse_line(line)
+
+                    if parsed is None:
+                        self.invalid_line_count += 1
+                        continue
+
+                    (
+                        teensy_time_us,
+                        acc_x_raw,
+                        acc_y_raw,
+                        acc_z_raw,
+                        gyro_x_raw,
+                        gyro_y_raw,
+                        gyro_z_raw,
+                    ) = parsed
+
+                    host_elapsed_s = (
+                        host_time_ns
+                        - self.state.session_t0_ns
+                    ) / 1_000_000_000.0
+
+                    writer.writerow(
+                        [
+                            host_time_ns,
+                            f"{host_elapsed_s:.9f}",
+                            teensy_time_us,
+                            acc_x_raw,
+                            acc_y_raw,
+                            acc_z_raw,
+                            gyro_x_raw,
+                            gyro_y_raw,
+                            gyro_z_raw,
+                        ]
+                    )
+
+                    self.sample_count += 1
+
+                    # Each paired row contains one sample from each
+                    # sensor, so both counts increase together.
+                    self.accel_count += 1
+                    self.gyro_count += 1
 
                 csv_file.flush()
 
         except Exception as exc:
             self.ready_event.set()
+
             self.state.report_error(
                 "IMU",
                 f"{type(exc).__name__}: {exc}",

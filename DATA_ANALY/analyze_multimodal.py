@@ -293,95 +293,177 @@ def downsample_for_plot(time_s, values, max_points=100000):
 # ---------------------------------------------------------------------
 # IMU loading and analysis
 # ---------------------------------------------------------------------
+STANDARD_GRAVITY_MS2 = 9.80665
+
+# Current firmware configuration:
+# CTRL1_XL = 0xA4 -> ±32 g
+# CTRL2_G  = 0xAC -> ±2000 degrees/s
+ACCEL_G_PER_LSB = 0.000976
+ACCEL_MS2_PER_LSB = ACCEL_G_PER_LSB * STANDARD_GRAVITY_MS2
+
+GYRO_DPS_PER_LSB = 0.070
+GYRO_RADS_PER_LSB = np.deg2rad(GYRO_DPS_PER_LSB)
 
 def load_imu_csv(path):
     """
-    Load the Teensy IMU CSV format:
+    Load the paired Teensy IMU CSV format:
 
-    host_time_ns,host_elapsed_s,teensy_time_us,type,
-    x_raw,y_raw,z_raw,fifo_remaining
+    host_time_ns,host_elapsed_s,teensy_time_us,
+    acc_x_raw,acc_y_raw,acc_z_raw,
+    gyro_x_raw,gyro_y_raw,gyro_z_raw
+
+    Accelerometer values are returned in m/s².
+    Gyroscope values are returned in rad/s.
     """
     df = pd.read_csv(path)
 
     if df.empty:
-        raise ValueError(f"IMU file is empty: {path}")
+        raise ValueError(
+            f"IMU file is empty: {path}"
+        )
 
     required_columns = {
         "host_time_ns",
         "host_elapsed_s",
         "teensy_time_us",
-        "type",
-        "x_raw",
-        "y_raw",
-        "z_raw",
+        "acc_x_raw",
+        "acc_y_raw",
+        "acc_z_raw",
+        "gyro_x_raw",
+        "gyro_y_raw",
+        "gyro_z_raw",
     }
 
-    missing_columns = required_columns.difference(df.columns)
+    missing_columns = required_columns.difference(
+        df.columns
+    )
 
     if missing_columns:
         raise ValueError(
-            f"Missing required IMU columns: {sorted(missing_columns)}\n"
+            f"Missing required IMU columns: "
+            f"{sorted(missing_columns)}\n"
             f"Available columns: {list(df.columns)}"
         )
 
-    # host_time_ns is the absolute host perf_counter timestamp.
-    # It is the best timestamp for synchronizing with GelSight and audio,
-    # provided those recorders also use time.perf_counter_ns().
-    df["_time_s"] = pd.to_numeric(
-        df["host_time_ns"],
-        errors="coerce",
-    ) * 1e-9
+    numeric_columns = [
+        "host_time_ns",
+        "host_elapsed_s",
+        "teensy_time_us",
+        "acc_x_raw",
+        "acc_y_raw",
+        "acc_z_raw",
+        "gyro_x_raw",
+        "gyro_y_raw",
+        "gyro_z_raw",
+    ]
 
-    # Convert raw sensor values to numeric.
-    for column in ["x_raw", "y_raw", "z_raw"]:
-        df[column] = pd.to_numeric(df[column], errors="coerce")
+    for column in numeric_columns:
+        df[column] = pd.to_numeric(
+            df[column],
+            errors="coerce",
+        )
 
-    type_values = (
-        df["type"]
-        .astype(str)
-        .str.strip()
-        .str.lower()
+    original_row_count = len(df)
+
+    # Remove rows that contain missing or nonnumeric values.
+    df = df.dropna(
+        subset=numeric_columns
+    ).copy()
+
+    sensor_columns = [
+        "acc_x_raw",
+        "acc_y_raw",
+        "acc_z_raw",
+        "gyro_x_raw",
+        "gyro_y_raw",
+        "gyro_z_raw",
+    ]
+
+    # Validate all channels against the int16_t range.
+    valid_rows = np.ones(
+        len(df),
+        dtype=bool,
     )
 
-    accel_df = df.loc[type_values == "accel"].copy()
-    gyro_df = df.loc[type_values == "gyro"].copy()
+    for column in sensor_columns:
+        valid_rows &= df[column].between(
+            -32768,
+            32767,
+        ).to_numpy()
 
-    if accel_df.empty:
+    df = df.loc[valid_rows].copy()
+
+    rejected_row_count = original_row_count - len(df)
+
+    if df.empty:
         raise ValueError(
-            "No accelerometer rows were found. "
-            f"Type values: {df['type'].unique()}"
+            "No valid paired IMU rows remained "
+            "after numeric and int16 validation."
         )
 
-    if gyro_df.empty:
-        raise ValueError(
-            "No gyroscope rows were found. "
-            f"Type values: {df['type'].unique()}"
-        )
+    # Ensure chronological order based on host timestamps.
+    df = df.sort_values(
+        "host_time_ns"
+    ).reset_index(drop=True)
+
+    # The rest of analyze_multimodal.py uses absolute
+    # perf_counter time in seconds for synchronization.
+    time_s = (
+        df["host_time_ns"].to_numpy(dtype=float)
+        * 1e-9
+    )
 
     output = {
         "raw": df,
         "timestamp_column": "host_time_ns",
-        "time_s": df["_time_s"].to_numpy(dtype=float),
+        "time_s": time_s,
 
         "accel": {
-            "time_s": accel_df["_time_s"].to_numpy(dtype=float),
-            "x": accel_df["x_raw"].to_numpy(dtype=float),
-            "y": accel_df["y_raw"].to_numpy(dtype=float),
-            "z": accel_df["z_raw"].to_numpy(dtype=float),
+            "time_s": time_s,
+            "x": (
+                df["acc_x_raw"].to_numpy(dtype=float)
+                * ACCEL_MS2_PER_LSB
+            ),
+            "y": (
+                df["acc_y_raw"].to_numpy(dtype=float)
+                * ACCEL_MS2_PER_LSB
+            ),
+            "z": (
+                df["acc_z_raw"].to_numpy(dtype=float)
+                * ACCEL_MS2_PER_LSB
+            ),
+            "unit": "m/s²",
+            "full_scale": "±32 g",
         },
 
         "gyro": {
-            "time_s": gyro_df["_time_s"].to_numpy(dtype=float),
-            "x": gyro_df["x_raw"].to_numpy(dtype=float),
-            "y": gyro_df["y_raw"].to_numpy(dtype=float),
-            "z": gyro_df["z_raw"].to_numpy(dtype=float),
+            "time_s": time_s,
+            "x": (
+                df["gyro_x_raw"].to_numpy(dtype=float)
+                * GYRO_RADS_PER_LSB
+            ),
+            "y": (
+                df["gyro_y_raw"].to_numpy(dtype=float)
+                * GYRO_RADS_PER_LSB
+            ),
+            "z": (
+                df["gyro_z_raw"].to_numpy(dtype=float)
+                * GYRO_RADS_PER_LSB
+            ),
+            "unit": "rad/s",
+            "full_scale": "±2000 °/s",
         },
     }
 
     print(
-        f"Loaded {len(accel_df)} accelerometer samples and "
-        f"{len(gyro_df)} gyroscope samples."
+        f"Loaded {len(df):,} paired IMU samples."
     )
+
+    if rejected_row_count:
+        print(
+            f"Rejected {rejected_row_count:,} "
+            "invalid IMU rows."
+        )
 
     return output
 
@@ -730,10 +812,22 @@ def plot_imu_time_series(imu, reference_s, output_path):
     available = []
 
     if imu["accel"] is not None:
-        available.append(("Accelerometer", imu["accel"]))
+        available.append(
+            (
+                "Accelerometer",
+                imu["accel"],
+                "Acceleration (m/s²)",
+            )
+        )
 
     if imu["gyro"] is not None:
-        available.append(("Gyroscope", imu["gyro"]))
+        available.append(
+            (
+                "Gyroscope",
+                imu["gyro"],
+                "Angular velocity (rad/s)",
+            )
+        )
 
     if not available:
         return
@@ -748,15 +842,33 @@ def plot_imu_time_series(imu, reference_s, output_path):
     if len(available) == 1:
         axes = [axes]
 
-    for axis_plot, (title, data) in zip(axes, available):
-        time_relative = make_relative_time(data["time_s"], reference_s)
+    for axis_plot, (title, data, ylabel) in zip(axes, available):
+        time_relative = make_relative_time(
+            data["time_s"],
+            reference_s,
+        )
 
-        axis_plot.plot(time_relative, data["x"], label="x", linewidth=0.8)
-        axis_plot.plot(time_relative, data["y"], label="y", linewidth=0.8)
-        axis_plot.plot(time_relative, data["z"], label="z", linewidth=0.8)
+        axis_plot.plot(
+            time_relative,
+            data["x"],
+            label="x",
+            linewidth=0.8,
+        )
+        axis_plot.plot(
+            time_relative,
+            data["y"],
+            label="y",
+            linewidth=0.8,
+        )
+        axis_plot.plot(
+            time_relative,
+            data["z"],
+            label="z",
+            linewidth=0.8,
+        )
 
         axis_plot.set_title(title)
-        axis_plot.set_ylabel("Sensor value")
+        axis_plot.set_ylabel(ylabel)
         axis_plot.grid(True, alpha=0.3)
         axis_plot.legend()
 
