@@ -11,20 +11,22 @@ from .shared import SharedRecordingState, monotonic_ns
 
 class IMULoadCellRecorder:
     """
-    Record paired IMU and HX711 data from one Teensy serial port.
+    Record IMU and ADS1220 packets from one Teensy.
 
-    Expected Teensy packet:
+    Expected firmware packets:
 
-        timestamp_us,
+        I,timestamp_us,
         acc_x,acc_y,acc_z,
-        gyro_x,gyro_y,gyro_z,
-        load_cell_raw
+        gyro_x,gyro_y,gyro_z
+
+        L,timestamp_us,load_cell_raw
 
     Output CSV:
 
         host_time_ns,
         host_elapsed_s,
         teensy_time_us,
+        type,
         acc_x_raw,acc_y_raw,acc_z_raw,
         gyro_x_raw,gyro_y_raw,gyro_z_raw,
         load_cell_raw
@@ -48,6 +50,7 @@ class IMULoadCellRecorder:
         self.thread: Optional[threading.Thread] = None
 
         self.sample_count = 0
+        self.imu_count = 0
         self.accel_count = 0
         self.gyro_count = 0
         self.load_cell_count = 0
@@ -61,7 +64,10 @@ class IMULoadCellRecorder:
         )
         self.thread.start()
 
-    def join(self, timeout: Optional[float] = None) -> None:
+    def join(
+        self,
+        timeout: Optional[float] = None,
+    ) -> None:
         if self.thread is not None:
             self.thread.join(timeout=timeout)
 
@@ -78,56 +84,102 @@ class IMULoadCellRecorder:
         if not line:
             return None
 
-        fields = line.split(",")
-
-        # Firmware prints exactly eight integer fields.
-        if len(fields) != 8:
+        # Ignore diagnostic lines printed by firmware.
+        if line.startswith("#"):
             return None
 
-        try:
-            values = tuple(
-                int(field.strip())
-                for field in fields
+        fields = [
+            field.strip()
+            for field in line.split(",")
+        ]
+
+        packet_type = fields[0]
+
+        if packet_type == "I":
+            if len(fields) != 8:
+                return None
+
+            try:
+                values = tuple(
+                    int(field)
+                    for field in fields[1:]
+                )
+            except ValueError:
+                return None
+
+            (
+                teensy_time_us,
+                acc_x_raw,
+                acc_y_raw,
+                acc_z_raw,
+                gyro_x_raw,
+                gyro_y_raw,
+                gyro_z_raw,
+            ) = values
+
+            imu_values = (
+                acc_x_raw,
+                acc_y_raw,
+                acc_z_raw,
+                gyro_x_raw,
+                gyro_y_raw,
+                gyro_z_raw,
             )
-        except ValueError:
-            return None
 
-        (
-            teensy_time_us,
-            acc_x_raw,
-            acc_y_raw,
-            acc_z_raw,
-            gyro_x_raw,
-            gyro_y_raw,
-            gyro_z_raw,
-            load_cell_raw,
-        ) = values
+            if not all(
+                -32768 <= value <= 32767
+                for value in imu_values
+            ):
+                return None
 
-        imu_values = (
-            acc_x_raw,
-            acc_y_raw,
-            acc_z_raw,
-            gyro_x_raw,
-            gyro_y_raw,
-            gyro_z_raw,
-        )
+            if not 0 <= teensy_time_us <= 0xFFFFFFFF:
+                return None
 
-        # IMU channels originate from int16_t.
-        if not all(
-            -32768 <= value <= 32767
-            for value in imu_values
-        ):
-            return None
+            return {
+                "type": "imu",
+                "teensy_time_us": teensy_time_us,
+                "acc_x_raw": acc_x_raw,
+                "acc_y_raw": acc_y_raw,
+                "acc_z_raw": acc_z_raw,
+                "gyro_x_raw": gyro_x_raw,
+                "gyro_y_raw": gyro_y_raw,
+                "gyro_z_raw": gyro_z_raw,
+                "load_cell_raw": "",
+            }
 
-        # micros() is an unsigned 32-bit value.
-        if not 0 <= teensy_time_us <= 0xFFFFFFFF:
-            return None
+        if packet_type == "L":
+            if len(fields) != 3:
+                return None
 
-        # HX711 is a signed 24-bit ADC.
-        if not -8_388_608 <= load_cell_raw <= 8_388_607:
-            return None
+            try:
+                teensy_time_us = int(fields[1])
+                load_cell_raw = int(fields[2])
+            except ValueError:
+                return None
 
-        return values
+            if not 0 <= teensy_time_us <= 0xFFFFFFFF:
+                return None
+
+            if not (
+                -8_388_608
+                <= load_cell_raw
+                <= 8_388_607
+            ):
+                return None
+
+            return {
+                "type": "loadcell",
+                "teensy_time_us": teensy_time_us,
+                "acc_x_raw": "",
+                "acc_y_raw": "",
+                "acc_z_raw": "",
+                "gyro_x_raw": "",
+                "gyro_y_raw": "",
+                "gyro_z_raw": "",
+                "load_cell_raw": load_cell_raw,
+            }
+
+        return None
 
     def _run(self) -> None:
         try:
@@ -152,6 +204,7 @@ class IMULoadCellRecorder:
                         "host_time_ns",
                         "host_elapsed_s",
                         "teensy_time_us",
+                        "type",
                         "acc_x_raw",
                         "acc_y_raw",
                         "acc_z_raw",
@@ -162,7 +215,6 @@ class IMULoadCellRecorder:
                     ]
                 )
 
-                # Opening USB serial may reset the Teensy.
                 time.sleep(self.startup_delay_s)
                 serial_port.reset_input_buffer()
 
@@ -186,22 +238,15 @@ class IMULoadCellRecorder:
                         self.invalid_line_count += 1
                         continue
 
+                    # Do not count firmware diagnostic lines as invalid.
+                    if line.lstrip().startswith("#"):
+                        continue
+
                     parsed = self._parse_line(line)
 
                     if parsed is None:
                         self.invalid_line_count += 1
                         continue
-
-                    (
-                        teensy_time_us,
-                        acc_x_raw,
-                        acc_y_raw,
-                        acc_z_raw,
-                        gyro_x_raw,
-                        gyro_y_raw,
-                        gyro_z_raw,
-                        load_cell_raw,
-                    ) = parsed
 
                     host_elapsed_s = (
                         host_time_ns
@@ -212,22 +257,25 @@ class IMULoadCellRecorder:
                         [
                             host_time_ns,
                             f"{host_elapsed_s:.9f}",
-                            teensy_time_us,
-                            acc_x_raw,
-                            acc_y_raw,
-                            acc_z_raw,
-                            gyro_x_raw,
-                            gyro_y_raw,
-                            gyro_z_raw,
-                            load_cell_raw,
+                            parsed["teensy_time_us"],
+                            parsed["type"],
+                            parsed["acc_x_raw"],
+                            parsed["acc_y_raw"],
+                            parsed["acc_z_raw"],
+                            parsed["gyro_x_raw"],
+                            parsed["gyro_y_raw"],
+                            parsed["gyro_z_raw"],
+                            parsed["load_cell_raw"],
                         ]
                     )
 
                     self.sample_count += 1
-                    self.accel_count += 1
-                    self.gyro_count += 1
 
-                    if load_cell_raw != -1:
+                    if parsed["type"] == "imu":
+                        self.imu_count += 1
+                        self.accel_count += 1
+                        self.gyro_count += 1
+                    else:
                         self.load_cell_count += 1
 
                 csv_file.flush()
@@ -236,6 +284,6 @@ class IMULoadCellRecorder:
             self.ready_event.set()
 
             self.state.report_error(
-                "IMU + HX711",
+                "IMU + ADS1220",
                 f"{type(exc).__name__}: {exc}",
             )

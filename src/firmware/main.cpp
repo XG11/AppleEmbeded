@@ -1,43 +1,87 @@
 #include <Arduino.h>
+#include <SPI.h>
 
-#include "hx711_sensor.h"
+#include "ADS1220.h"
 #include "lsm6dso32.h"
 
 
-// ---------------------------------------------------------------------
+// =====================================================================
 // Hardware pins
-// ---------------------------------------------------------------------
+// =====================================================================
 
-static constexpr uint8_t IMU_CS = 10;
+static constexpr uint8_t IMU_CS_PIN = 10;
 
-// Change these two pins if necessary.
-static constexpr uint8_t HX711_DATA_PIN = 6;
-static constexpr uint8_t HX711_CLOCK_PIN = 7;
+static constexpr uint8_t ADS1220_CS_PIN = 9;
+static constexpr uint8_t ADS1220_DRDY_PIN = 8;
 
 
-// ---------------------------------------------------------------------
+// =====================================================================
+// Serial configuration
+// =====================================================================
+
+static constexpr uint32_t SERIAL_BAUD = 2000000;
+
+
+// =====================================================================
 // Sensor objects
-// ---------------------------------------------------------------------
+// =====================================================================
 
-LSM6DSO32 imu(IMU_CS);
+LSM6DSO32 imu(IMU_CS_PIN);
 
-HX711Sensor loadCell(
-    HX711_DATA_PIN,
-    HX711_CLOCK_PIN
+ADS1220 loadCell(
+    ADS1220_CS_PIN,
+    ADS1220_DRDY_PIN
 );
 
 
-// ---------------------------------------------------------------------
+// =====================================================================
+// ADS1220 configuration
+// =====================================================================
+
+// Register 0:
+// MUX  = 0010: AIN0 positive, AIN1 negative
+// GAIN = 111 : gain 128
+// PGA_BYPASS = 0: PGA enabled
+//
+// Binary: 0010 1110 = 0x2E
+static constexpr uint8_t ADS1220_REG0 = 0x0E;
+
+// Register 1:
+// DR   = 111: highest data-rate selection
+// MODE = 1  : turbo mode
+// CM   = 1  : continuous conversion mode
+// TS   = 0  : temperature sensor disabled
+// BCS  = 0  : burnout current sources disabled
+//
+// Binary: 1111 1000 = 0xF8
+//
+// With DR=111 and turbo mode enabled, the target rate is 2000 SPS.
+static constexpr uint8_t ADS1220_REG1 = 0xF8;
+
+// Register 2:
+// VREF = 00: internal 2.048 V reference
+// 50/60 rejection disabled
+// low-side switch disabled
+// IDAC disabled
+static constexpr uint8_t ADS1220_REG2 = 0x00;
+
+// Register 3:
+// IDAC routing disabled
+// DRDY pin used only as DRDY output
+static constexpr uint8_t ADS1220_REG3 = 0x00;
+
+
+// =====================================================================
 // LSM6DSO32 FIFO tags
-// ---------------------------------------------------------------------
+// =====================================================================
 
 static constexpr uint8_t FIFO_TAG_GYRO = 0x01;
 static constexpr uint8_t FIFO_TAG_ACCEL = 0x02;
 
 
-// ---------------------------------------------------------------------
+// =====================================================================
 // Pending paired IMU sample
-// ---------------------------------------------------------------------
+// =====================================================================
 
 static int16_t accelX = 0;
 static int16_t accelY = 0;
@@ -51,12 +95,24 @@ static bool haveAccel = false;
 static bool haveGyro = false;
 
 
-// ---------------------------------------------------------------------
-// Serial output
-// ---------------------------------------------------------------------
+// =====================================================================
+// ADS1220 sampling statistics
+// =====================================================================
 
-void printSensorRow(uint32_t timestampUs)
+static uint32_t adsSampleCount = 0;
+static uint32_t adsWindowStartUs = 0;
+static float adsMeasuredSps = 0.0f;
+
+static constexpr uint32_t SPS_WINDOW_US = 1000000;
+
+
+// =====================================================================
+// Serial output
+// =====================================================================
+
+void printImuRow(uint32_t timestampUs)
 {
+    Serial.print("I,");
     Serial.print(timestampUs);
     Serial.print(',');
 
@@ -71,33 +127,139 @@ void printSensorRow(uint32_t timestampUs)
     Serial.print(',');
     Serial.print(gyroY);
     Serial.print(',');
-    Serial.print(gyroZ);
-    Serial.print(',');
-
-    // Before the first HX711 conversion is available, output zero.
-    // After that, repeat the latest reading on each IMU row.
-    if (loadCell.hasReading())
-    {
-        Serial.println(loadCell.latestRaw());
-    }
-    else
-    {
-        Serial.println(0);
-    }
+    Serial.println(gyroZ);
 }
 
 
-// ---------------------------------------------------------------------
+void printLoadCellRow(
+    uint32_t timestampUs,
+    int32_t rawValue
+)
+{
+    Serial.print("L,");
+    Serial.print(timestampUs);
+    Serial.print(',');
+    Serial.println(rawValue);
+}
+
+
+void updateAdsSps(uint32_t currentTimeUs)
+{
+    const uint32_t elapsedUs =
+        currentTimeUs - adsWindowStartUs;
+
+    if (elapsedUs < SPS_WINDOW_US)
+    {
+        return;
+    }
+
+    adsMeasuredSps =
+        static_cast<float>(adsSampleCount) *
+        1000000.0f /
+        static_cast<float>(elapsedUs);
+
+    Serial.print("# ADS1220 SPS: ");
+    Serial.println(adsMeasuredSps, 2);
+
+    adsSampleCount = 0;
+    adsWindowStartUs = currentTimeUs;
+}
+
+
+// =====================================================================
+// ADS1220 initialization
+// =====================================================================
+
+bool initializeAds1220()
+{
+    loadCell.begin();
+
+    loadCell.writeRegister(
+        0x00,
+        ADS1220_REG0
+    );
+
+    loadCell.writeRegister(
+        0x01,
+        ADS1220_REG1
+    );
+
+    loadCell.writeRegister(
+        0x02,
+        ADS1220_REG2
+    );
+
+    loadCell.writeRegister(
+        0x03,
+        ADS1220_REG3
+    );
+
+    const uint8_t reg0 =
+        loadCell.readRegister(0x00);
+
+    const uint8_t reg1 =
+        loadCell.readRegister(0x01);
+
+    const uint8_t reg2 =
+        loadCell.readRegister(0x02);
+
+    const uint8_t reg3 =
+        loadCell.readRegister(0x03);
+
+    Serial.print("# ADS1220 REG0 = 0x");
+    Serial.println(reg0, HEX);
+
+    Serial.print("# ADS1220 REG1 = 0x");
+    Serial.println(reg1, HEX);
+
+    Serial.print("# ADS1220 REG2 = 0x");
+    Serial.println(reg2, HEX);
+
+    Serial.print("# ADS1220 REG3 = 0x");
+    Serial.println(reg3, HEX);
+
+    if (
+        reg0 != ADS1220_REG0 ||
+        reg1 != ADS1220_REG1 ||
+        reg2 != ADS1220_REG2 ||
+        reg3 != ADS1220_REG3
+    )
+    {
+        Serial.println(
+            "# ERROR: ADS1220 register readback mismatch"
+        );
+
+        return false;
+    }
+
+    loadCell.startConversion();
+
+    return true;
+}
+
+
+// =====================================================================
 // Setup
-// ---------------------------------------------------------------------
+// =====================================================================
 
 void setup()
 {
-    Serial.begin(2000000);
+    Serial.begin(SERIAL_BAUD);
     delay(1000);
 
     Serial.println();
-    Serial.println("LSM6DSO32 + HX711 acquisition");
+    Serial.println(
+        "# LSM6DSO32 + ADS1220 acquisition"
+    );
+
+    // Ensure both devices are deselected before initializing SPI.
+    pinMode(IMU_CS_PIN, OUTPUT);
+    digitalWrite(IMU_CS_PIN, HIGH);
+
+    pinMode(ADS1220_CS_PIN, OUTPUT);
+    digitalWrite(ADS1220_CS_PIN, HIGH);
+
+    SPI.begin();
 
     // -----------------------------------------------------------------
     // IMU initialization
@@ -105,7 +267,7 @@ void setup()
 
     if (!imu.begin())
     {
-        Serial.println("ERROR: IMU not found");
+        Serial.println("# ERROR: IMU not found");
 
         while (true)
         {
@@ -115,68 +277,87 @@ void setup()
 
     imu.configureFifoAccelGyro();
 
-    Serial.print("CTRL1_XL = 0x");
+    Serial.print("# CTRL1_XL = 0x");
     Serial.println(
         imu.readRegister(0x10),
         HEX
     );
 
-    Serial.print("CTRL2_G = 0x");
+    Serial.print("# CTRL2_G = 0x");
     Serial.println(
         imu.readRegister(0x11),
         HEX
     );
 
-    Serial.print("FIFO_CTRL3 = 0x");
+    Serial.print("# FIFO_CTRL3 = 0x");
     Serial.println(
         imu.readRegister(0x09),
         HEX
     );
 
-    Serial.print("FIFO_CTRL4 = 0x");
+    Serial.print("# FIFO_CTRL4 = 0x");
     Serial.println(
         imu.readRegister(0x0A),
         HEX
     );
 
     // -----------------------------------------------------------------
-    // HX711 initialization
+    // ADS1220 initialization
     // -----------------------------------------------------------------
 
-    loadCell.begin();
+    if (!initializeAds1220())
+    {
+        while (true)
+        {
+            delay(1000);
+        }
+    }
 
-    Serial.print("HX711 data pin: ");
-    Serial.println(HX711_DATA_PIN);
+    adsWindowStartUs = micros();
 
-    Serial.print("HX711 clock pin: ");
-    Serial.println(HX711_CLOCK_PIN);
-
-    // -----------------------------------------------------------------
-    // CSV header
-    // -----------------------------------------------------------------
+    // Packet description.
+    Serial.println(
+        "# I,timestamp_us,"
+        "acc_x,acc_y,acc_z,"
+        "gyro_x,gyro_y,gyro_z"
+    );
 
     Serial.println(
-        "timestamp_us,"
-        "acc_x,acc_y,acc_z,"
-        "gyro_x,gyro_y,gyro_z,"
-        "load_cell_raw"
+        "# L,timestamp_us,load_cell_raw"
     );
 }
 
 
-// ---------------------------------------------------------------------
+// =====================================================================
 // Main loop
-// ---------------------------------------------------------------------
+// =====================================================================
 
 void loop()
 {
-    // Update the HX711 only when a conversion is ready.
-    //
-    // This does not wait for a new HX711 reading. The most recent value
-    // remains available while the next conversion is taking place.
-    loadCell.update();
+    // -----------------------------------------------------------------
+    // Read all available ADS1220 conversions
+    // -----------------------------------------------------------------
 
-    // Read the current number of entries in the IMU FIFO.
+    if (loadCell.dataReady())
+    {
+        const uint32_t timestampUs = micros();
+        const int32_t rawValue =
+            loadCell.readData();
+
+        printLoadCellRow(
+            timestampUs,
+            rawValue
+        );
+
+        adsSampleCount++;
+    }
+
+    updateAdsSps(micros());
+
+    // -----------------------------------------------------------------
+    // Drain IMU FIFO
+    // -----------------------------------------------------------------
+
     uint16_t count = imu.fifoCount();
 
     while (count > 0)
@@ -187,7 +368,12 @@ void loop()
         int16_t y = 0;
         int16_t z = 0;
 
-        if (!imu.readFifoSample(tag, x, y, z))
+        if (!imu.readFifoSample(
+            tag,
+            x,
+            y,
+            z
+        ))
         {
             break;
         }
@@ -209,13 +395,9 @@ void loop()
             haveGyro = true;
         }
 
-        // Print one row after both accelerometer and gyroscope samples
-        // have been received.
         if (haveAccel && haveGyro)
         {
-            const uint32_t timestampUs = micros();
-
-            printSensorRow(timestampUs);
+            printImuRow(micros());
 
             haveAccel = false;
             haveGyro = false;

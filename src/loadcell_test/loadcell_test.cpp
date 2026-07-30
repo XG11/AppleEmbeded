@@ -1,152 +1,68 @@
 #include <Arduino.h>
+#include <SPI.h>
+#include "ADS1220.h"
 
-#include "hx711_sensor.h"
+#define CS_PIN    9
+#define DRDY_PIN  8
 
+ADS1220 adc(CS_PIN, DRDY_PIN);
 
-// =====================================================================
-// Configuration
-// =====================================================================
+// Calibration factor: (Vref / gain) / (2^23) — tune to your load cell
+const float LOAD_CELL_CAL = 1.0f;
 
-static constexpr uint8_t HX711_DATA_PIN = 6;
-static constexpr uint8_t HX711_CLOCK_PIN = 7;
+void setup() {
+    Serial.begin(115200);
+    while (!Serial) {}
+    Serial.println("Teensy booted");
 
-static constexpr uint32_t SERIAL_BAUD = 2000000;
+    SPI.begin();
+    SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE1));
 
-// Calculate and update the measured SPS once per second.
-static constexpr uint32_t SPS_WINDOW_US = 1000000;
+    Serial.println("Initializing ADS1220...");
 
+    adc.begin();
+    adc.reset();
 
-// =====================================================================
-// HX711 sensor
-// =====================================================================
+    Serial.println("ADS1220 reset done");
 
-HX711Sensor loadCell(
-    HX711_DATA_PIN,
-    HX711_CLOCK_PIN
-);
-
-
-// =====================================================================
-// Sampling-rate measurement
-// =====================================================================
-
-// Start time of the current SPS measurement window.
-static uint32_t spsWindowStartUs = 0;
-
-// Number of HX711 samples acquired during the current window.
-static uint32_t samplesInWindow = 0;
-
-// Most recently calculated sampling rate.
-static float measuredSps = 0.0f;
+    adc.writeRegister(0x00, 0x2E);
+    adc.writeRegister(0x01, 0xD4);
 
 
-// =====================================================================
-// Update measured samples per second
-// =====================================================================
+    Serial.println("Registers written");
+    Serial.print("Reg0 readback (should be 60): 0x");
+    Serial.println(adc.readRegister(0x00), HEX);
+    Serial.print("Reg1 readback (should be D4): 0x");
+    Serial.println(adc.readRegister(0x01), HEX);
 
-void updateSps(uint32_t currentTimeUs)
-{
-    const uint32_t elapsedUs =
-        currentTimeUs - spsWindowStartUs;
+    adc.startConversion();
 
-    if (elapsedUs < SPS_WINDOW_US)
-    {
-        return;
-    }
+    Serial.println("Conversion started, waiting for DRDY...");
 
-    measuredSps =
-        static_cast<float>(samplesInWindow) *
-        1000000.0f /
-        static_cast<float>(elapsedUs);
+    // Zero the offset with 100 samples --> sets the initial position as zero.
+    adc.findADCOffset(0);
 
-    // Print a human-readable status line once per second.
-    //
-    // Lines beginning with '#' can easily be ignored by a Python CSV
-    // loader by using:
-    //
-    // pd.read_csv(file_path, comment="#")
-    Serial.print("# HX711 SPS: ");
-    Serial.println(measuredSps, 2);
+    Serial.println("SETUP COMPLETE");
 
-    samplesInWindow = 0;
-    spsWindowStartUs = currentTimeUs;
+    delay(5000);
 }
 
+void loop() {
 
-// =====================================================================
-// Setup
-// =====================================================================
+    //    Wait for DRDY to go LOW (conversion ready)
+    while (digitalRead(DRDY_PIN)) {}
+    delayMicroseconds(10);
 
-void setup()
-{
-    Serial.begin(SERIAL_BAUD);
-    delay(1000);
+    // Calibrated Values (?) not sure what they are calibrated to.
+    //float value = adc.readDataCalibrated(1.0f);
+    // Serial.println(value);
+    //Serial.print("time: "); // printing values to plot on loadcell_liveplot.py
+    //Serial.print(millis() / 1000.0, 3);
+    //Serial.print(" modified_weight: ");
+    //Serial.println(value);
 
-    Serial.println();
-    Serial.println("# HX711 load-cell-only acquisition");
+    // Raw Values
+    int32_t raw = adc.readData();
+    Serial.println(raw);
 
-    Serial.print("# HX711 data pin: ");
-    Serial.println(HX711_DATA_PIN);
-
-    Serial.print("# HX711 clock pin: ");
-    Serial.println(HX711_CLOCK_PIN);
-
-    // Initialize the HX711.
-    loadCell.begin();
-
-    // Start SPS measurement window after initialization.
-    spsWindowStartUs = micros();
-
-    // CSV header.
-    Serial.println(
-        "timestamp_us,"
-        "load_cell_raw,"
-        "sps"
-    );
-}
-
-
-// =====================================================================
-// Main loop
-// =====================================================================
-
-void loop()
-{
-    const uint32_t currentTimeUs = micros();
-
-    // Update the displayed SPS even if the HX711 temporarily stops
-    // producing samples.
-    //updateSps(currentTimeUs);
-
-    // HX711 DOUT is LOW when a new conversion is ready.
-    //
-    // Checking the data-ready pin before calling update() allows us to
-    // count actual conversions rather than repeatedly counting the
-    // cached reading returned by latestRaw().
-    if (digitalRead(HX711_DATA_PIN) != LOW)
-    {
-        return;
-    }
-
-    // Read the available HX711 conversion.
-    loadCell.update();
-
-    if (!loadCell.hasReading())
-    {
-        return;
-    }
-
-    const uint32_t sampleTimestampUs = micros();
-    const int32_t rawValue = loadCell.latestRaw();
-
-    //samplesInWindow++;
-
-    // CSV data row.
-    Serial.println(sampleTimestampUs);
-    Serial.print(',');
-
-    Serial.print(rawValue);
-    Serial.print(',');
-
-    //Serial.println(measuredSps, 2);
 }
