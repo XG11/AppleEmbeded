@@ -305,24 +305,40 @@ GYRO_RADS_PER_LSB = np.deg2rad(GYRO_DPS_PER_LSB)
 
 def load_imu_csv(path):
     """
-    Load paired LSM6DSO32 and HX711 measurements.
+    Load asynchronous LSM6DSO32 IMU and ADS1220 load-cell packets.
 
     Expected CSV columns:
 
-        host_time_ns,host_elapsed_s,teensy_time_us,
+        host_time_ns,
+        host_elapsed_s,
+        teensy_time_us,
+        type,
         acc_x_raw,acc_y_raw,acc_z_raw,
         gyro_x_raw,gyro_y_raw,gyro_z_raw,
         load_cell_raw
+
+    Packet types:
+
+        imu:
+            Contains accelerometer and gyroscope values.
+            load_cell_raw is empty.
+
+        loadcell:
+            Contains load_cell_raw.
+            IMU columns are empty.
     """
     df = pd.read_csv(path)
 
     if df.empty:
-        raise ValueError(f"Sensor file is empty: {path}")
+        raise ValueError(
+            f"Sensor file is empty: {path}"
+        )
 
     required_columns = {
         "host_time_ns",
         "host_elapsed_s",
         "teensy_time_us",
+        "type",
         "acc_x_raw",
         "acc_y_raw",
         "acc_z_raw",
@@ -332,29 +348,59 @@ def load_imu_csv(path):
         "load_cell_raw",
     }
 
-    missing_columns = required_columns.difference(df.columns)
+    missing_columns = required_columns.difference(
+        df.columns
+    )
 
     if missing_columns:
         raise ValueError(
-            f"Missing required columns: {sorted(missing_columns)}\n"
+            f"Missing required columns: "
+            f"{sorted(missing_columns)}\n"
             f"Available columns: {list(df.columns)}"
         )
 
-    numeric_columns = list(required_columns)
-
-    for column in numeric_columns:
-        df[column] = pd.to_numeric(
-            df[column],
-            errors="coerce",
-        )
+    # Normalize packet-type strings.
+    df["type"] = (
+        df["type"]
+        .astype(str)
+        .str.strip()
+        .str.lower()
+    )
 
     original_count = len(df)
 
-    df = df.dropna(
-        subset=numeric_columns
-    ).copy()
+    recognized_packet_mask = df["type"].isin(
+        ["imu", "loadcell"]
+    )
 
-    imu_columns = [
+    unrecognized_count = int(
+        np.sum(~recognized_packet_mask)
+    )
+
+    df = df.loc[
+        recognized_packet_mask
+    ].copy()
+
+    # -----------------------------------------------------------------
+    # Split asynchronous packet types before handling missing values.
+    # -----------------------------------------------------------------
+
+    imu_df = df.loc[
+        df["type"] == "imu"
+    ].copy()
+
+    load_cell_df = df.loc[
+        df["type"] == "loadcell"
+    ].copy()
+
+    # -----------------------------------------------------------------
+    # Parse IMU rows
+    # -----------------------------------------------------------------
+
+    imu_numeric_columns = [
+        "host_time_ns",
+        "host_elapsed_s",
+        "teensy_time_us",
         "acc_x_raw",
         "acc_y_raw",
         "acc_z_raw",
@@ -363,63 +409,169 @@ def load_imu_csv(path):
         "gyro_z_raw",
     ]
 
-    valid_rows = np.ones(len(df), dtype=bool)
+    for column in imu_numeric_columns:
+        imu_df[column] = pd.to_numeric(
+            imu_df[column],
+            errors="coerce",
+        )
 
-    for column in imu_columns:
-        valid_rows &= (
-            df[column]
+    imu_count_before_validation = len(imu_df)
+
+    # Only require the fields that belong to an IMU packet.
+    imu_df = imu_df.dropna(
+        subset=imu_numeric_columns
+    ).copy()
+
+    imu_valid_mask = np.ones(
+        len(imu_df),
+        dtype=bool,
+    )
+
+    for column in [
+        "acc_x_raw",
+        "acc_y_raw",
+        "acc_z_raw",
+        "gyro_x_raw",
+        "gyro_y_raw",
+        "gyro_z_raw",
+    ]:
+        imu_valid_mask &= (
+            imu_df[column]
             .between(-32768, 32767)
             .to_numpy()
         )
 
-    valid_rows &= (
-        df["load_cell_raw"]
+    imu_df = imu_df.loc[
+        imu_valid_mask
+    ].copy()
+
+    imu_df = imu_df.sort_values(
+        "host_time_ns"
+    ).reset_index(drop=True)
+
+    rejected_imu_count = (
+        imu_count_before_validation
+        - len(imu_df)
+    )
+
+    # -----------------------------------------------------------------
+    # Parse ADS1220 load-cell rows
+    # -----------------------------------------------------------------
+
+    load_cell_numeric_columns = [
+        "host_time_ns",
+        "host_elapsed_s",
+        "teensy_time_us",
+        "load_cell_raw",
+    ]
+
+    for column in load_cell_numeric_columns:
+        load_cell_df[column] = pd.to_numeric(
+            load_cell_df[column],
+            errors="coerce",
+        )
+
+    load_cell_count_before_validation = len(
+        load_cell_df
+    )
+
+    # Only require the fields that belong to a load-cell packet.
+    load_cell_df = load_cell_df.dropna(
+        subset=load_cell_numeric_columns
+    ).copy()
+
+    load_cell_valid_mask = (
+        load_cell_df["load_cell_raw"]
         .between(-8_388_608, 8_388_607)
         .to_numpy()
     )
 
-    df = df.loc[valid_rows].copy()
+    load_cell_df = load_cell_df.loc[
+        load_cell_valid_mask
+    ].copy()
 
-    rejected_count = original_count - len(df)
-
-    if df.empty:
-        raise ValueError(
-            "No valid sensor rows remained after validation."
-        )
-
-    df = df.sort_values(
+    load_cell_df = load_cell_df.sort_values(
         "host_time_ns"
     ).reset_index(drop=True)
 
-    time_s = (
-        df["host_time_ns"].to_numpy(dtype=float)
+    rejected_load_cell_count = (
+        load_cell_count_before_validation
+        - len(load_cell_df)
+    )
+
+    if imu_df.empty:
+        raise ValueError(
+            "No valid IMU packets remained after validation."
+        )
+
+    if load_cell_df.empty:
+        raise ValueError(
+            "No valid ADS1220 load-cell packets remained "
+            "after validation."
+        )
+
+    # -----------------------------------------------------------------
+    # Construct separate time arrays
+    # -----------------------------------------------------------------
+
+    imu_time_s = (
+        imu_df["host_time_ns"].to_numpy(
+            dtype=float
+        )
         * 1e-9
     )
 
-    load_cell_raw = df[
-        "load_cell_raw"
-    ].to_numpy(dtype=float)
+    load_cell_time_s = (
+        load_cell_df["host_time_ns"].to_numpy(
+            dtype=float
+        )
+        * 1e-9
+    )
 
-    # -1 corresponds to the invalid all-ones HX711 result you observed.
-    load_cell_raw[load_cell_raw == -1] = np.nan
+    load_cell_raw = (
+        load_cell_df["load_cell_raw"]
+        .to_numpy(dtype=float, copy=True)
+    )
+
+    # Flag exact positive or negative ADS1220 saturation.
+    load_cell_saturated = (
+        (load_cell_raw == -8_388_608)
+        | (load_cell_raw == 8_388_607)
+    )
+
+    load_cell_raw[
+        load_cell_saturated
+    ] = np.nan
+
+    # -----------------------------------------------------------------
+    # Return the same general dictionary structure used elsewhere in
+    # the analysis program.
+    # -----------------------------------------------------------------
 
     output = {
         "raw": df,
+        "imu_raw": imu_df,
+        "load_cell_raw": load_cell_df,
         "timestamp_column": "host_time_ns",
-        "time_s": time_s,
 
         "accel": {
-            "time_s": time_s,
+            "time_s": imu_time_s,
             "x": (
-                df["acc_x_raw"].to_numpy(dtype=float)
+                imu_df["acc_x_raw"].to_numpy(
+                    dtype=float
+                )
                 * ACCEL_MS2_PER_LSB
             ),
             "y": (
-                df["acc_y_raw"].to_numpy(dtype=float)
+                imu_df["acc_y_raw"].to_numpy(
+                    dtype=float
+                )
                 * ACCEL_MS2_PER_LSB
             ),
             "z": (
-                df["acc_z_raw"].to_numpy(dtype=float)
+                imu_df["acc_z_raw"].to_numpy(
+                    dtype=float
+                )
                 * ACCEL_MS2_PER_LSB
             ),
             "unit": "m/s²",
@@ -427,17 +579,23 @@ def load_imu_csv(path):
         },
 
         "gyro": {
-            "time_s": time_s,
+            "time_s": imu_time_s,
             "x": (
-                df["gyro_x_raw"].to_numpy(dtype=float)
+                imu_df["gyro_x_raw"].to_numpy(
+                    dtype=float
+                )
                 * GYRO_RADS_PER_LSB
             ),
             "y": (
-                df["gyro_y_raw"].to_numpy(dtype=float)
+                imu_df["gyro_y_raw"].to_numpy(
+                    dtype=float
+                )
                 * GYRO_RADS_PER_LSB
             ),
             "z": (
-                df["gyro_z_raw"].to_numpy(dtype=float)
+                imu_df["gyro_z_raw"].to_numpy(
+                    dtype=float
+                )
                 * GYRO_RADS_PER_LSB
             ),
             "unit": "rad/s",
@@ -445,27 +603,62 @@ def load_imu_csv(path):
         },
 
         "load_cell": {
-            "time_s": time_s,
+            "time_s": load_cell_time_s,
             "raw": load_cell_raw,
             "unit": "ADC counts",
         },
     }
 
-    print(f"Loaded {len(df):,} combined sensor rows.")
+    print(
+        f"Loaded {len(imu_df):,} IMU packets."
+    )
 
     valid_load_cell_count = int(
         np.sum(np.isfinite(load_cell_raw))
     )
 
     print(
-        f"Valid load-cell rows: "
-        f"{valid_load_cell_count:,}/{len(df):,}"
+        f"Loaded {len(load_cell_df):,} "
+        f"ADS1220 packets."
     )
 
-    if rejected_count:
+    print(
+        f"Valid load-cell samples: "
+        f"{valid_load_cell_count:,}/"
+        f"{len(load_cell_df):,}"
+    )
+
+    saturated_count = int(
+        np.sum(load_cell_saturated)
+    )
+
+    if saturated_count:
         print(
-            f"Rejected {rejected_count:,} malformed rows."
+            f"ADS1220 saturated samples: "
+            f"{saturated_count:,}"
         )
+
+    if rejected_imu_count:
+        print(
+            f"Rejected malformed IMU packets: "
+            f"{rejected_imu_count:,}"
+        )
+
+    if rejected_load_cell_count:
+        print(
+            f"Rejected malformed load-cell packets: "
+            f"{rejected_load_cell_count:,}"
+        )
+
+    if unrecognized_count:
+        print(
+            f"Ignored unrecognized packet rows: "
+            f"{unrecognized_count:,}"
+        )
+
+    print(
+        f"Total source rows: {original_count:,}"
+    )
 
     return output
 
@@ -475,7 +668,7 @@ def calibrate_load_cell(
     counts_per_newton,
 ):
     """
-    Convert HX711 raw counts into force in newtons.
+    Convert LOADCELL ADC raw counts into force in newtons.
 
     force_n = (raw - zero_offset) / counts_per_newton
     """
@@ -857,6 +1050,7 @@ def plot_imu_time_series(imu, reference_s, output_path):
                 "Angular velocity (rad/s)",
             )
         )
+        
 
     if not available:
         return
@@ -1024,7 +1218,7 @@ def plot_load_cell_time_series(
             load_cell["raw"],
             dtype=float,
         )
-        ylabel = "HX711 output (ADC counts)"
+        ylabel = "ADC output"
         title = "Load-cell raw output"
 
     valid = (
@@ -1034,7 +1228,7 @@ def plot_load_cell_time_series(
 
     if not np.any(valid):
         warnings.warn(
-            "No valid HX711 samples were available for plotting."
+            "No valid ADC samples were available for plotting."
         )
         return
 
@@ -1153,7 +1347,8 @@ def plot_audio_spectrogram(audio, reference_s, output_path):
     axis_plot.set_title("Audio spectrogram")
     axis_plot.set_xlabel("Time from shared reference (s)")
     axis_plot.set_ylabel("Frequency (Hz)")
-    axis_plot.set_ylim(0, min(sample_rate / 2, 12000))
+    #axis_plot.set_ylim(0, min(sample_rate / 2, 48000))
+    axis_plot.set_ylim(0, 48000)
 
     colorbar = fig.colorbar(image, ax=axis_plot)
     colorbar.set_label("Power (dB)")
@@ -1361,7 +1556,7 @@ def write_summary(
             lines.append(f"  Mean: {np.mean(valid_load_values):.6f} {unit}")
             lines.append(f"  Standard deviation: {np.std(valid_load_values):.6f} {unit}")
         else:
-            lines.append("  No valid HX711 values were available.")
+            lines.append("  No valid ADC values were available.")
 
         lines.append("")
 
@@ -1417,7 +1612,7 @@ def write_summary(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Analyze synchronized GelSight, IMU, HX711, and audio data."
+        description="Analyze synchronized GelSight, IMU, LOADCELL, and audio data."
     )
 
     parser.add_argument(
@@ -1455,7 +1650,7 @@ def main():
         type=float,
         default=None,
         help=(
-            "HX711 zero-load offset in raw ADC counts. "
+            "LOADCELL zero-load offset in raw ADC counts. "
             "Use together with --load-cell-counts-per-newton."
         ),
     )
@@ -1465,7 +1660,7 @@ def main():
         type=float,
         default=None,
         help=(
-            "HX711 calibration factor in counts per newton. "
+            "LOADCELL ADC calibration factor in counts per newton. "
             "Use together with --load-cell-zero."
         ),
     )
@@ -1527,7 +1722,7 @@ def main():
     required = {
         "GelSight AVI": video_path,
         "GelSight timestamp CSV": video_timestamp_path,
-        "IMU + HX711 CSV": imu_path,
+        "IMU + LOADCELL CSV": imu_path,
         "audio WAV": audio_path,
     }
 
@@ -1545,7 +1740,7 @@ def main():
     print("Input files")
     print(f"  GelSight video:     {video_path.name}")
     print(f"  GelSight timestamp: {video_timestamp_path.name}")
-    print(f"  IMU + HX711:        {imu_path.name}")
+    print(f"  IMU + LOADCELL:        {imu_path.name}")
     print(f"  Audio:              {audio_path.name}")
     print(
         f"  Audio timestamp:    "
@@ -1589,6 +1784,13 @@ def main():
     if imu["gyro"] is not None:
         start_candidates.append(
             np.nanmin(imu["gyro"]["time_s"])
+        )
+
+    if imu.get("load_cell") is not None:
+        start_candidates.append(
+            np.nanmin(
+                imu["load_cell"]["time_s"]
+            )
         )
 
     start_candidates.append(

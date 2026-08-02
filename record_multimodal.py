@@ -3,7 +3,7 @@
 import argparse
 import sys
 from pathlib import Path
-from typing import List
+from typing import List, Optional, Tuple
 
 import cv2
 import sounddevice as sd
@@ -37,6 +37,9 @@ def find_teensy_ports() -> List[str]:
 
 
 def list_serial_devices() -> None:
+    """
+    Print available serial devices.
+    """
     print("\nSerial devices:")
 
     serial_ports = list(list_ports.comports())
@@ -55,6 +58,9 @@ def list_serial_devices() -> None:
 
 
 def list_audio_devices() -> None:
+    """
+    Print available sounddevice audio devices.
+    """
     print("\nAudio devices:")
     print(sd.query_devices())
 
@@ -80,6 +86,9 @@ def open_camera(index: int):
 
 
 def list_cameras(max_index: int = 10) -> None:
+    """
+    Probe OpenCV camera indices and print the available cameras.
+    """
     print("\nCameras:")
 
     found = False
@@ -94,9 +103,11 @@ def list_cameras(max_index: int = 10) -> None:
         width = int(
             capture.get(cv2.CAP_PROP_FRAME_WIDTH)
         )
+
         height = int(
             capture.get(cv2.CAP_PROP_FRAME_HEIGHT)
         )
+
         fps = float(
             capture.get(cv2.CAP_PROP_FPS)
         )
@@ -121,7 +132,7 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Record a synchronized multimodal session containing "
-            "LSM6DSO32 IMU data, HX711 load-cell data, piezo data, "
+            "LSM6DSO32 IMU data, ADS1220 load-cell data, piezo data, "
             "GelSight video, and USB microphone audio."
         )
     )
@@ -134,7 +145,7 @@ def parse_arguments() -> argparse.Namespace:
     )
 
     # -----------------------------------------------------------------
-    # Combined IMU + HX711 Teensy
+    # Combined IMU + ADS1220 Teensy
     # -----------------------------------------------------------------
 
     parser.add_argument(
@@ -143,7 +154,7 @@ def parse_arguments() -> argparse.Namespace:
         default=None,
         help=(
             "Serial port for the Teensy that records the "
-            "LSM6DSO32 IMU and HX711 load cell."
+            "LSM6DSO32 IMU and ADS1220 load cell."
         ),
     )
 
@@ -152,7 +163,7 @@ def parse_arguments() -> argparse.Namespace:
         type=int,
         default=2_000_000,
         help=(
-            "Baud rate for the combined IMU/HX711 Teensy. "
+            "Baud rate for the combined IMU/ADS1220 Teensy. "
             "Default: 2000000."
         ),
     )
@@ -224,7 +235,10 @@ def parse_arguments() -> argparse.Namespace:
         "--audio-device",
         type=int,
         default=None,
-        help="sounddevice input-device index for the USB microphone.",
+        help=(
+            "sounddevice input-device index for the "
+            "RØDE USB microphone."
+        ),
     )
 
     parser.add_argument(
@@ -286,9 +300,9 @@ def parse_arguments() -> argparse.Namespace:
 # ---------------------------------------------------------------------
 
 def resolve_teensy_ports(
-    imu_port: str | None,
-    piezo_port: str | None,
-) -> tuple[str, str]:
+    imu_port: Optional[str],
+    piezo_port: Optional[str],
+) -> Tuple[str, str]:
     """
     Resolve the two Teensy serial ports.
 
@@ -296,20 +310,23 @@ def resolve_teensy_ports(
     only performed when both ports are omitted and exactly two Teensy
     devices are detected.
 
-    Because USB enumeration order is not guaranteed, explicit port
-    arguments are recommended.
+    USB enumeration order is not guaranteed, so explicit port arguments
+    are recommended.
     """
+
+    # Both ports were supplied explicitly.
     if imu_port is not None and piezo_port is not None:
         if imu_port == piezo_port:
             raise ValueError(
-                "The IMU/HX711 and piezo recorders cannot use "
-                "the same serial port."
+                "The IMU/ADS1220 recorder and piezo recorder "
+                "cannot use the same serial port."
             )
 
         return imu_port, piezo_port
 
     teensy_ports = find_teensy_ports()
 
+    # Neither port was supplied.
     if imu_port is None and piezo_port is None:
         if len(teensy_ports) != 2:
             raise RuntimeError(
@@ -321,11 +338,18 @@ def resolve_teensy_ports(
             )
 
         print(
-            "\nWarning: assigning Teensy ports according to USB "
-            "enumeration order."
+            "\nWarning: assigning Teensy ports according to "
+            "USB enumeration order."
         )
-        print(f"  IMU + HX711: {teensy_ports[0]}")
-        print(f"  Piezo:       {teensy_ports[1]}")
+
+        print(
+            f"  IMU + ADS1220: {teensy_ports[0]}"
+        )
+
+        print(
+            f"  Piezo:         {teensy_ports[1]}"
+        )
+
         print(
             "Use explicit --imu-port and --piezo-port arguments "
             "if these assignments are incorrect."
@@ -333,8 +357,7 @@ def resolve_teensy_ports(
 
         return teensy_ports[0], teensy_ports[1]
 
-    # Resolve one missing port while preserving the explicitly provided
-    # one.
+    # One port was supplied and the other must be resolved.
     used_port = (
         imu_port
         if imu_port is not None
@@ -365,7 +388,61 @@ def resolve_teensy_ports(
     else:
         piezo_port = candidates[0]
 
+    if imu_port == piezo_port:
+        raise ValueError(
+            "The IMU/ADS1220 recorder and piezo recorder "
+            "cannot use the same serial port."
+        )
+
     return imu_port, piezo_port
+
+
+# ---------------------------------------------------------------------
+# Argument validation
+# ---------------------------------------------------------------------
+
+def validate_arguments(
+    args: argparse.Namespace,
+) -> None:
+    if args.duration <= 0:
+        raise ValueError(
+            "--duration must be greater than zero."
+        )
+
+    if args.imu_baud <= 0:
+        raise ValueError(
+            "--imu-baud must be greater than zero."
+        )
+
+    if args.piezo_baud <= 0:
+        raise ValueError(
+            "--piezo-baud must be greater than zero."
+        )
+
+    if args.audio_rate <= 0:
+        raise ValueError(
+            "--audio-rate must be greater than zero."
+        )
+
+    if args.audio_channels <= 0:
+        raise ValueError(
+            "--audio-channels must be greater than zero."
+        )
+
+    if args.audio_block_size <= 0:
+        raise ValueError(
+            "--audio-block-size must be greater than zero."
+        )
+
+    if args.fps <= 0:
+        raise ValueError(
+            "--fps must be greater than zero."
+        )
+
+    if args.camera_probe_count <= 0:
+        raise ValueError(
+            "--camera-probe-count must be greater than zero."
+        )
 
 
 # ---------------------------------------------------------------------
@@ -381,14 +458,7 @@ def main() -> None:
         list_cameras(args.camera_probe_count)
         return
 
-    if args.duration <= 0:
-        raise ValueError("--duration must be greater than zero.")
-
-    if args.imu_baud <= 0:
-        raise ValueError("--imu-baud must be greater than zero.")
-
-    if args.piezo_baud <= 0:
-        raise ValueError("--piezo-baud must be greater than zero.")
+    validate_arguments(args)
 
     imu_port, piezo_port = resolve_teensy_ports(
         imu_port=args.imu_port,
@@ -396,15 +466,23 @@ def main() -> None:
     )
 
     print("\nSelected devices")
-    print(f"  IMU + HX711 Teensy: {imu_port}")
-    print(f"  Piezo Teensy:       {piezo_port}")
-    print(f"  GelSight camera:    {args.camera}")
-    print(f"  Audio device:       {args.audio_device}")
+    print(
+        f"  IMU + ADS1220 Teensy: {imu_port}"
+    )
+    print(
+        f"  Piezo Teensy:         {piezo_port}"
+    )
+    print(
+        f"  GelSight camera:      {args.camera}"
+    )
+    print(
+        f"  Audio device:         {args.audio_device}"
+    )
 
     session = RecordingSession(
         duration_s=args.duration,
 
-        # Combined LSM6DSO32 + HX711 stream.
+        # Combined LSM6DSO32 + ADS1220 stream.
         imu_port=imu_port,
         imu_baud=args.imu_baud,
 
@@ -412,7 +490,7 @@ def main() -> None:
         piezo_port=piezo_port,
         piezo_baud=args.piezo_baud,
 
-        # GelSight.
+        # GelSight camera.
         camera_index=args.camera,
         camera_width=args.width,
         camera_height=args.height,

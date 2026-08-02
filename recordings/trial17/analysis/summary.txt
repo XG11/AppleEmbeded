@@ -1,0 +1,72 @@
+MULTIMODAL RECORDING ANALYSIS
+======================================================================
+
+Input files
+  IMU: /Users/xiaoruigu/Documents/PlatformIO/Projects/sensing_device/recordings/trial17/imu_loadcell.csv
+  Audio: /Users/xiaoruigu/Documents/PlatformIO/Projects/sensing_device/recordings/trial17/rode_microphone.wav
+  Audio timestamp: /Users/xiaoruigu/Documents/PlatformIO/Projects/sensing_device/recordings/trial17/rode_microphone_timestamps.csv
+  GelSight video: /Users/xiaoruigu/Documents/PlatformIO/Projects/sensing_device/recordings/trial17/gelsight.avi
+  GelSight timestamp: /Users/xiaoruigu/Documents/PlatformIO/Projects/sensing_device/recordings/trial17/gelsight_timestamps.csv
+
+Shared reference timestamp: 191767.714545875 s
+
+Accelerometer
+  Samples: 199873
+  Duration: 30.024874 s
+  Mean sampling rate: 6656.881 Hz
+  Median sampling rate: 11390.560 Hz
+  Median interval: 87.792 us
+  Timing jitter standard deviation: 135.686 us
+  Gaps greater than 1.5x median interval: 68056
+
+Gyroscope
+  Samples: 199873
+  Duration: 30.024874 s
+  Mean sampling rate: 6656.881 Hz
+  Median sampling rate: 11390.560 Hz
+  Median interval: 87.792 us
+  Timing jitter standard deviation: 135.686 us
+  Gaps greater than 1.5x median interval: 68056
+
+Load cell
+  Valid rows: 61086 / 61086
+  Minimum: -91753.000000 ADC counts
+  Maximum: -24290.000000 ADC counts
+  Mean: -57547.225862 ADC counts
+  Standard deviation: 10283.276681 ADC counts
+
+GelSight timestamps
+  Samples: 564
+  Duration: 30.019234 s
+  Mean sampling rate: 18.755 Hz
+  Median sampling rate: 18.754 Hz
+  Median interval: 53323.083 us
+  Timing jitter standard deviation: 154.821 us
+  Gaps greater than 1.5x median interval: 0
+
+Audio
+  Sample rate: 48000 Hz
+  Samples: 1440768
+  Duration: 30.016000 s
+  Recorded start timestamp: 191767.731332458
+
+GelSight video
+  Resolution: 3280 x 2464
+  FPS reported by AVI: 25.000000
+  Frames reported by AVI: 564
+  Timestamp rows: 564
+  Frames processed for motion: 564
+
+Detected candidate contact events
+  Event 01: 3.966897 s from shared reference
+  Event 02: 4.457533 s from shared reference
+  Event 03: 6.239988 s from shared reference
+  Event 04: 6.855013 s from shared reference
+  Event 05: 7.469802 s from shared reference
+  Event 06: 8.383353 s from shared reference
+  Event 07: 9.664735 s from shared reference
+  Event 08: 10.218938 s from shared reference
+  Event 09: 10.672839 s from shared reference
+  Event 10: 11.418517 s from shared reference
+  Event 11: 11.890370 s from shared reference
+  Event 12: 12.372100 s from shared reference

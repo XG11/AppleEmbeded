@@ -1,0 +1,72 @@
+MULTIMODAL RECORDING ANALYSIS
+======================================================================
+
+Input files
+  IMU: /Users/xiaoruigu/Documents/PlatformIO/Projects/sensing_device/recordings/trial16/imu_loadcell.csv
+  Audio: /Users/xiaoruigu/Documents/PlatformIO/Projects/sensing_device/recordings/trial16/rode_microphone.wav
+  Audio timestamp: /Users/xiaoruigu/Documents/PlatformIO/Projects/sensing_device/recordings/trial16/rode_microphone_timestamps.csv
+  GelSight video: /Users/xiaoruigu/Documents/PlatformIO/Projects/sensing_device/recordings/trial16/gelsight.avi
+  GelSight timestamp: /Users/xiaoruigu/Documents/PlatformIO/Projects/sensing_device/recordings/trial16/gelsight_timestamps.csv
+
+Shared reference timestamp: 190452.233598166 s
+
+Accelerometer
+  Samples: 199875
+  Duration: 30.021236 s
+  Mean sampling rate: 6657.754 Hz
+  Median sampling rate: 10096.828 Hz
+  Median interval: 99.041 us
+  Timing jitter standard deviation: 117.396 us
+  Gaps greater than 1.5x median interval: 79818
+
+Gyroscope
+  Samples: 199875
+  Duration: 30.021236 s
+  Mean sampling rate: 6657.754 Hz
+  Median sampling rate: 10096.828 Hz
+  Median interval: 99.041 us
+  Timing jitter standard deviation: 117.396 us
+  Gaps greater than 1.5x median interval: 79818
+
+Load cell
+  Valid rows: 61086 / 61086
+  Minimum: -5362.000000 ADC counts
+  Maximum: 914.000000 ADC counts
+  Mean: 2.482009 ADC counts
+  Standard deviation: 899.253920 ADC counts
+
+GelSight timestamps
+  Samples: 563
+  Duration: 29.966382 s
+  Mean sampling rate: 18.754 Hz
+  Median sampling rate: 18.754 Hz
+  Median interval: 53322.333 us
+  Timing jitter standard deviation: 211.502 us
+  Gaps greater than 1.5x median interval: 0
+
+Audio
+  Sample rate: 48000 Hz
+  Samples: 1441792
+  Duration: 30.037333 s
+  Recorded start timestamp: 190452.23553950002
+
+GelSight video
+  Resolution: 3280 x 2464
+  FPS reported by AVI: 25.000000
+  Frames reported by AVI: 563
+  Timestamp rows: 563
+  Frames processed for motion: 563
+
+Detected candidate contact events
+  Event 01: 19.774927 s from shared reference
+  Event 02: 21.328695 s from shared reference
+  Event 03: 22.055488 s from shared reference
+  Event 04: 22.600785 s from shared reference
+  Event 05: 23.378137 s from shared reference
+  Event 06: 23.973802 s from shared reference
+  Event 07: 24.479918 s from shared reference
+  Event 08: 25.177978 s from shared reference
+  Event 09: 25.923028 s from shared reference
+  Event 10: 26.808843 s from shared reference
+  Event 11: 28.429408 s from shared reference
+  Event 12: 28.836397 s from shared reference
