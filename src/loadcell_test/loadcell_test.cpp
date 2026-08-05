@@ -40,7 +40,7 @@ void setup() {
     Serial.println("Conversion started, waiting for DRDY...");
 
     // Zero the offset with 100 samples --> sets the initial position as zero.
-    adc.findADCOffset(0);
+    //adc.findADCOffset(100);
 
     Serial.println("SETUP COMPLETE");
 
@@ -66,3 +66,4 @@ void loop() {
     Serial.println(raw);
 
 }
+

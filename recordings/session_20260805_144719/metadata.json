@@ -1,0 +1,74 @@
+{
+  "session_name": "session_20260805_144719",
+  "wall_start_iso": "2026-08-05T14:47:21.265751-05:00",
+  "host_monotonic_start_ns": 285888867180333,
+  "requested_duration_s": 60.0,
+  "imu_loadcell": {
+    "serial_port": "/dev/cu.usbmodem201104101",
+    "baud_rate": 2000000,
+    "output_file": "imu_loadcell.csv",
+    "serial_packet_format": [
+      "teensy_time_us",
+      "acc_x_raw",
+      "acc_y_raw",
+      "acc_z_raw",
+      "gyro_x_raw",
+      "gyro_y_raw",
+      "gyro_z_raw",
+      "load_cell_raw"
+    ],
+    "csv_columns": [
+      "host_time_ns",
+      "host_elapsed_s",
+      "teensy_time_us",
+      "acc_x_raw",
+      "acc_y_raw",
+      "acc_z_raw",
+      "gyro_x_raw",
+      "gyro_y_raw",
+      "gyro_z_raw",
+      "load_cell_raw"
+    ],
+    "accelerometer_configuration": {
+      "device": "LSM6DSO32",
+      "full_scale_g": 32,
+      "sensitivity_g_per_lsb": 0.000976
+    },
+    "gyroscope_configuration": {
+      "device": "LSM6DSO32",
+      "full_scale_dps": 2000,
+      "sensitivity_dps_per_lsb": 0.07
+    },
+    "load_cell_configuration": {
+      "adc": "HX711",
+      "raw_range_min": -8388608,
+      "raw_range_max": 8388607,
+      "calibrated": false
+    }
+  },
+  "piezo": {
+    "serial_port": "/dev/cu.usbmodem150585901",
+    "baud_rate": 2000000,
+    "output_file": "piezo.csv"
+  },
+  "gelsight": {
+    "camera_index": 0,
+    "requested_width": 0,
+    "requested_height": 0,
+    "requested_fps": 30.0,
+    "actual_width": 3280,
+    "actual_height": 2464,
+    "actual_fps": 25.0,
+    "video_file": "gelsight.avi",
+    "timestamp_file": "gelsight_timestamps.csv"
+  },
+  "rode_microphone": {
+    "device_index": 1,
+    "device_name": "R\u00d8DE VideoMic GO II",
+    "sample_rate_hz": 48000,
+    "channels": 1,
+    "block_size": 1024,
+    "audio_file": "rode_microphone.wav",
+    "timestamp_file": "rode_microphone_timestamps.csv"
+  }
+}

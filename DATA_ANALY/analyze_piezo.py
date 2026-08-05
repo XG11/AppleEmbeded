@@ -1,578 +1,268 @@
+#!/usr/bin/env python3
+"""
+Plot a selected time clip from piezo.csv and compute its FFT.
+
+Example:
+    python plot_piezo_fft_clip.py piezo.csv --start 5.0 --end 7.0
+
+Optional:
+    python plot_piezo_fft_clip.py piezo.csv --start 5.0 --end 7.0 --max-freq 3000
+"""
+
 import argparse
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from scipy import signal
-
-
-ADC_MAX = 4095.0
-ADC_REFERENCE_MV = 3300.0
 
 
 def load_piezo_csv(csv_path: Path):
     df = pd.read_csv(csv_path)
 
-    print("Piezo CSV columns:")
-    print(list(df.columns))
-
-    if "host_elapsed_s" in df.columns:
-        time_s = df["host_elapsed_s"].to_numpy(
-            dtype=np.float64
-        )
-
-    elif "host_elapsed_ms" in df.columns:
-        time_s = (
-            df["host_elapsed_ms"].to_numpy(
-                dtype=np.float64
-            )
-            / 1000.0
-        )
-
-    else:
+    required_columns = {"host_elapsed_s", "adc_raw"}
+    missing = required_columns - set(df.columns)
+    if missing:
         raise ValueError(
-            "Piezo CSV must contain either "
-            "'host_elapsed_s' or 'host_elapsed_ms'."
+            f"Missing required CSV columns: {sorted(missing)}\n"
+            f"Available columns: {list(df.columns)}"
         )
 
-    if "voltage_mv" in df.columns:
-        signal_mv = df["voltage_mv"].to_numpy(
-            dtype=np.float64
-        )
+    time_s = df["host_elapsed_s"].to_numpy(dtype=np.float64)
+    signal_raw = df["adc_raw"].to_numpy(dtype=np.float64)
 
-    elif "adc_raw" in df.columns:
-        adc_raw = df["adc_raw"].to_numpy(
-            dtype=np.float64
-        )
-
-        signal_mv = (
-            adc_raw
-            * ADC_REFERENCE_MV
-            / ADC_MAX
-        )
-
-    else:
-        raise ValueError(
-            "Piezo CSV must contain either "
-            "'voltage_mv' or 'adc_raw'."
-        )
-
-    valid = (
-        np.isfinite(time_s)
-        & np.isfinite(signal_mv)
-    )
-
+    valid = np.isfinite(time_s) & np.isfinite(signal_raw)
     time_s = time_s[valid]
-    signal_mv = signal_mv[valid]
+    signal_raw = signal_raw[valid]
 
     if len(time_s) < 2:
-        raise ValueError(
-            "Piezo CSV does not contain enough valid samples."
-        )
+        raise ValueError("The CSV does not contain enough valid samples.")
 
+    # Ensure timestamps are increasing.
     order = np.argsort(time_s)
-
     time_s = time_s[order]
-    signal_mv = signal_mv[order]
+    signal_raw = signal_raw[order]
 
-    return time_s, signal_mv
+    # Remove duplicate timestamps because interpolation requires unique x values.
+    time_s, unique_indices = np.unique(time_s, return_index=True)
+    signal_raw = signal_raw[unique_indices]
+
+    return time_s, signal_raw
 
 
-def estimate_sample_rate(time_s):
-    time_difference = np.diff(time_s)
-
-    valid_differences = time_difference[
-        time_difference > 0
-    ]
-
-    if len(valid_differences) == 0:
+def select_clip(time_s, signal_raw, start_s, end_s):
+    if start_s < time_s[0]:
         raise ValueError(
-            "Unable to estimate sampling rate."
+            f"--start must be at least {time_s[0]:.6f} s."
         )
 
-    median_period_s = np.median(
-        valid_differences
+    if end_s > time_s[-1]:
+        raise ValueError(
+            f"--end must be no greater than {time_s[-1]:.6f} s."
+        )
+
+    if end_s <= start_s:
+        raise ValueError("--end must be greater than --start.")
+
+    mask = (time_s >= start_s) & (time_s <= end_s)
+    clip_time = time_s[mask]
+    clip_signal = signal_raw[mask]
+
+    if len(clip_time) < 4:
+        raise ValueError(
+            "The selected clip contains too few samples. "
+            "Choose a longer time interval."
+        )
+
+    return clip_time, clip_signal
+
+
+def resample_uniformly(clip_time, clip_signal):
+    """
+    The host timestamps are not perfectly evenly spaced, while a standard FFT
+    assumes uniform sampling. This function interpolates the selected clip onto
+    a uniform time grid using the median timestamp spacing.
+    """
+    dt = np.diff(clip_time)
+    positive_dt = dt[dt > 0]
+
+    if len(positive_dt) == 0:
+        raise ValueError("Could not determine a valid sample interval.")
+
+    median_dt = np.median(positive_dt)
+    sample_rate_hz = 1.0 / median_dt
+
+    number_of_samples = int(
+        np.floor((clip_time[-1] - clip_time[0]) * sample_rate_hz)
+    ) + 1
+
+    uniform_time = (
+        clip_time[0]
+        + np.arange(number_of_samples, dtype=np.float64) / sample_rate_hz
     )
 
-    sample_rate_hz = 1.0 / median_period_s
-
-    return sample_rate_hz, valid_differences
-
-
-def calculate_fft(
-    signal_mv,
-    sample_rate_hz,
-):
-    centered_signal = (
-        signal_mv
-        - np.mean(signal_mv)
+    uniform_signal = np.interp(
+        uniform_time,
+        clip_time,
+        clip_signal,
     )
 
-    window = np.hanning(
-        len(centered_signal)
-    )
+    return uniform_time, uniform_signal, sample_rate_hz
 
-    windowed_signal = (
-        centered_signal
-        * window
-    )
 
-    fft_values = np.fft.rfft(
-        windowed_signal
-    )
+def calculate_fft(signal_raw, sample_rate_hz):
+    # Remove DC offset so the zero-frequency peak does not dominate.
+    centered_signal = signal_raw - np.mean(signal_raw)
 
+    # Hann window reduces spectral leakage at the ends of the clip.
+    window = np.hanning(len(centered_signal))
+    windowed_signal = centered_signal * window
+
+    fft_complex = np.fft.rfft(windowed_signal)
     frequencies_hz = np.fft.rfftfreq(
         len(windowed_signal),
         d=1.0 / sample_rate_hz,
     )
 
-    magnitude_mv = np.abs(
-        fft_values
+    # One-sided amplitude spectrum with window-gain correction.
+    coherent_gain = np.mean(window)
+    amplitude = (
+        2.0
+        * np.abs(fft_complex)
+        / (len(windowed_signal) * coherent_gain)
     )
 
-    window_gain = np.sum(window)
+    # DC and Nyquist bins should not be doubled.
+    amplitude[0] *= 0.5
+    if len(windowed_signal) % 2 == 0:
+        amplitude[-1] *= 0.5
 
-    if window_gain > 0:
-        magnitude_mv = (
-            2.0
-            * magnitude_mv
-            / window_gain
-        )
-
-    if len(magnitude_mv) > 0:
-        magnitude_mv[0] /= 2.0
-
-    return (
-        frequencies_hz,
-        magnitude_mv,
-        centered_signal,
-    )
-
-
-def calculate_spectrogram(
-    signal_mv,
-    sample_rate_hz,
-    window_duration_s=0.02,
-    overlap_fraction=0.75,
-):
-    centered_signal = (
-        signal_mv
-        - np.mean(signal_mv)
-    )
-
-    samples_per_window = int(
-        sample_rate_hz
-        * window_duration_s
-    )
-
-    samples_per_window = max(
-        32,
-        samples_per_window,
-    )
-
-    samples_per_window = min(
-        samples_per_window,
-        len(centered_signal),
-    )
-
-    overlap_samples = int(
-        samples_per_window
-        * overlap_fraction
-    )
-
-    overlap_samples = min(
-        overlap_samples,
-        samples_per_window - 1,
-    )
-
-    (
-        frequencies_hz,
-        times_s,
-        power,
-    ) = signal.spectrogram(
-        centered_signal,
-        fs=sample_rate_hz,
-        window="hann",
-        nperseg=samples_per_window,
-        noverlap=overlap_samples,
-        detrend=False,
-        scaling="density",
-        mode="psd",
-    )
-
-    power_db = 10.0 * np.log10(
-        power
-        + np.finfo(float).eps
-    )
-
-    return (
-        frequencies_hz,
-        times_s,
-        power_db,
-    )
-
-
-def print_statistics(
-    time_s,
-    signal_mv,
-    centered_signal,
-    sample_rate_hz,
-    sample_periods,
-):
-    duration_s = (
-        time_s[-1]
-        - time_s[0]
-    )
-
-    rms_mv = np.sqrt(
-        np.mean(
-            centered_signal ** 2
-        )
-    )
-
-    peak_absolute_mv = np.max(
-        np.abs(centered_signal)
-    )
-
-    peak_to_peak_mv = (
-        np.max(signal_mv)
-        - np.min(signal_mv)
-    )
-
-    mean_period_us = (
-        np.mean(sample_periods)
-        * 1e6
-    )
-
-    median_period_us = (
-        np.median(sample_periods)
-        * 1e6
-    )
-
-    print()
-    print("Piezo recording summary")
-    print(
-        f"Samples:             "
-        f"{len(signal_mv)}"
-    )
-    print(
-        f"Duration:            "
-        f"{duration_s:.3f} s"
-    )
-    print(
-        f"Estimated rate:      "
-        f"{sample_rate_hz:.2f} Hz"
-    )
-    print(
-        f"Mean sample period:  "
-        f"{mean_period_us:.2f} us"
-    )
-    print(
-        f"Median period:       "
-        f"{median_period_us:.2f} us"
-    )
-    print(
-        f"Mean voltage:        "
-        f"{np.mean(signal_mv):.2f} mV"
-    )
-    print(
-        f"Minimum voltage:     "
-        f"{np.min(signal_mv):.2f} mV"
-    )
-    print(
-        f"Maximum voltage:     "
-        f"{np.max(signal_mv):.2f} mV"
-    )
-    print(
-        f"Peak-to-peak:        "
-        f"{peak_to_peak_mv:.2f} mV"
-    )
-    print(
-        f"AC RMS:              "
-        f"{rms_mv:.2f} mV"
-    )
-    print(
-        f"Maximum AC peak:     "
-        f"{peak_absolute_mv:.2f} mV"
-    )
-
-
-def plot_results(
-    time_s,
-    signal_mv,
-    centered_signal,
-    frequencies_hz,
-    magnitude_mv,
-    spectrogram_frequencies_hz,
-    spectrogram_times_s,
-    spectrogram_power_db,
-    max_frequency_hz,
-):
-    relative_time_s = (
-        time_s
-        - time_s[0]
-    )
-
-    plt.figure(
-        figsize=(12, 5)
-    )
-
-    plt.plot(
-        relative_time_s,
-        signal_mv,
-        linewidth=0.7,
-    )
-
-    plt.xlabel("Time (s)")
-    plt.ylabel("Voltage (mV)")
-    plt.title(
-        "Piezo Contact Microphone Raw Signal"
-    )
-    plt.grid(True)
-    plt.tight_layout()
-
-    plt.figure(
-        figsize=(12, 5)
-    )
-
-    plt.plot(
-        relative_time_s,
-        centered_signal,
-        linewidth=0.7,
-    )
-
-    plt.xlabel("Time (s)")
-    plt.ylabel("AC voltage (mV)")
-    plt.title(
-        "Piezo Signal with DC Offset Removed"
-    )
-    plt.grid(True)
-    plt.tight_layout()
-
-    frequency_mask = (
-        frequencies_hz
-        <= max_frequency_hz
-    )
-
-    plt.figure(
-        figsize=(12, 5)
-    )
-
-    plt.plot(
-        frequencies_hz[
-            frequency_mask
-        ],
-        magnitude_mv[
-            frequency_mask
-        ],
-        linewidth=0.8,
-    )
-
-    plt.xlabel("Frequency (Hz)")
-    plt.ylabel("Magnitude (mV)")
-    plt.title(
-        "Piezo Contact Microphone Spectrum"
-    )
-    plt.grid(True)
-    plt.tight_layout()
-
-    spectrogram_frequency_mask = (
-        spectrogram_frequencies_hz
-        <= max_frequency_hz
-    )
-
-    plt.figure(
-        figsize=(12, 6)
-    )
-
-    mesh = plt.pcolormesh(
-        spectrogram_times_s,
-        spectrogram_frequencies_hz[
-            spectrogram_frequency_mask
-        ],
-        spectrogram_power_db[
-            spectrogram_frequency_mask,
-            :
-        ],
-        shading="auto",
-    )
-
-    plt.xlabel("Time (s)")
-    plt.ylabel("Frequency (Hz)")
-    plt.title(
-        "Piezo Contact Microphone Spectrogram"
-    )
-
-    colorbar = plt.colorbar(mesh)
-
-    colorbar.set_label(
-        "Power spectral density (dB)"
-    )
-
-    plt.tight_layout()
-    plt.show()
+    return frequencies_hz, amplitude
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description=(
-            "Analyze the piezo contact "
-            "microphone CSV."
-        )
+        description="Plot a time clip from piezo.csv and calculate its FFT."
     )
-
     parser.add_argument(
-        "input",
+        "csv",
         type=Path,
-        help=(
-            "Path to piezo.csv or to a "
-            "recording session directory."
-        ),
+        help="Path to piezo.csv",
     )
-
     parser.add_argument(
-        "--max-frequency",
+        "--start",
         type=float,
-        default=5000.0,
-        help=(
-            "Maximum frequency displayed "
-            "in the FFT and spectrogram. "
-            "Default: 5000 Hz."
-        ),
+        required=True,
+        help="Clip start time in seconds.",
     )
-
     parser.add_argument(
-        "--window-duration",
+        "--end",
         type=float,
-        default=0.02,
-        help=(
-            "Spectrogram window duration "
-            "in seconds. Default: 0.02."
-        ),
+        required=True,
+        help="Clip end time in seconds.",
     )
-
     parser.add_argument(
-        "--overlap",
+        "--max-freq",
         type=float,
-        default=0.75,
+        default=None,
         help=(
-            "Spectrogram overlap fraction "
-            "between 0 and less than 1. "
-            "Default: 0.75."
+            "Maximum displayed FFT frequency in Hz. "
+            "Default: Nyquist frequency."
         ),
     )
-
+    parser.add_argument(
+        "--log-y",
+        action="store_true",
+        help="Display the FFT amplitude axis using a logarithmic scale.",
+    )
     args = parser.parse_args()
 
-    if args.window_duration <= 0:
-        raise ValueError(
-            "--window-duration must be greater than 0."
-        )
+    time_s, signal_raw = load_piezo_csv(args.csv)
 
-    if not 0 <= args.overlap < 1:
-        raise ValueError(
-            "--overlap must be between 0 and less than 1."
-        )
+    print(f"Dataset time range: {time_s[0]:.6f} to {time_s[-1]:.6f} s")
 
-    input_path = (
-        args.input
-        .expanduser()
-        .resolve()
-    )
-
-    if input_path.is_dir():
-        csv_path = (
-            input_path
-            / "piezo.csv"
-        )
-    else:
-        csv_path = input_path
-
-    if not csv_path.exists():
-        raise FileNotFoundError(
-            f"Piezo CSV not found: {csv_path}"
-        )
-
-    print(
-        f"Loading piezo data: "
-        f"{csv_path}"
-    )
-
-    (
+    clip_time, clip_signal = select_clip(
         time_s,
-        signal_mv,
-    ) = load_piezo_csv(
-        csv_path
+        signal_raw,
+        args.start,
+        args.end,
     )
 
-    (
+    uniform_time, uniform_signal, sample_rate_hz = resample_uniformly(
+        clip_time,
+        clip_signal,
+    )
+
+    frequencies_hz, amplitude = calculate_fft(
+        uniform_signal,
         sample_rate_hz,
-        sample_periods,
-    ) = estimate_sample_rate(
-        time_s
     )
 
-    (
+    clip_duration_s = uniform_time[-1] - uniform_time[0]
+    frequency_resolution_hz = sample_rate_hz / len(uniform_signal)
+    nyquist_hz = sample_rate_hz / 2.0
+
+    print(f"Selected clip: {args.start:.6f} to {args.end:.6f} s")
+    print(f"Clip duration: {clip_duration_s:.6f} s")
+    print(f"Samples in resampled clip: {len(uniform_signal)}")
+    print(f"Estimated sample rate: {sample_rate_hz:.2f} Hz")
+    print(f"FFT frequency resolution: {frequency_resolution_hz:.3f} Hz")
+    print(f"Nyquist frequency: {nyquist_hz:.2f} Hz")
+
+    # Ignore DC when reporting the strongest nonzero frequency.
+    if len(amplitude) > 1:
+        peak_index = np.argmax(amplitude[1:]) + 1
+        print(
+            f"Strongest non-DC frequency: "
+            f"{frequencies_hz[peak_index]:.2f} Hz "
+            f"(amplitude {amplitude[peak_index]:.3f} ADC counts)"
+        )
+
+    # Figure 1: selected time clip
+    plt.figure(figsize=(12, 5))
+    plt.plot(
+        uniform_time,
+        uniform_signal,
+        linewidth=0.8,
+    )
+    plt.title(
+        f"Piezo Signal Clip: {args.start:.3f}–{args.end:.3f} s"
+    )
+    plt.xlabel("Time (s)")
+    plt.ylabel("ADC raw")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    # Figure 2: FFT
+    plt.figure(figsize=(12, 5))
+    plt.plot(
         frequencies_hz,
-        magnitude_mv,
-        centered_signal,
-    ) = calculate_fft(
-        signal_mv=signal_mv,
-        sample_rate_hz=sample_rate_hz,
+        amplitude,
+        linewidth=0.8,
     )
+    plt.title(
+        f"FFT of Piezo Clip: {args.start:.3f}–{args.end:.3f} s"
+    )
+    plt.xlabel("Frequency (Hz)")
+    plt.ylabel("Amplitude (ADC counts)")
 
-    (
-        spectrogram_frequencies_hz,
-        spectrogram_times_s,
-        spectrogram_power_db,
-    ) = calculate_spectrogram(
-        signal_mv=signal_mv,
-        sample_rate_hz=sample_rate_hz,
-        window_duration_s=(
-            args.window_duration
-        ),
-        overlap_fraction=(
-            args.overlap
-        ),
-    )
+    if args.max_freq is not None:
+        if args.max_freq <= 0:
+            raise ValueError("--max-freq must be greater than zero.")
+        plt.xlim(0, min(args.max_freq, nyquist_hz))
+    else:
+        plt.xlim(0, nyquist_hz)
 
-    print_statistics(
-        time_s=time_s,
-        signal_mv=signal_mv,
-        centered_signal=centered_signal,
-        sample_rate_hz=sample_rate_hz,
-        sample_periods=sample_periods,
-    )
+    if args.log_y:
+        positive_amplitude = amplitude[amplitude > 0]
+        if len(positive_amplitude) > 0:
+            plt.yscale("log")
 
-    maximum_available_frequency = (
-        sample_rate_hz / 2.0
-    )
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
 
-    display_frequency = min(
-        args.max_frequency,
-        maximum_available_frequency,
-    )
-
-    plot_results(
-        time_s=time_s,
-        signal_mv=signal_mv,
-        centered_signal=centered_signal,
-        frequencies_hz=frequencies_hz,
-        magnitude_mv=magnitude_mv,
-        spectrogram_frequencies_hz=(
-            spectrogram_frequencies_hz
-        ),
-        spectrogram_times_s=(
-            spectrogram_times_s
-        ),
-        spectrogram_power_db=(
-            spectrogram_power_db
-        ),
-        max_frequency_hz=(
-            display_frequency
-        ),
-    )
+    # Matplotlib's window toolbar allows pan and zoom.
+    plt.show()
 
 
 if __name__ == "__main__":

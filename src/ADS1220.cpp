@@ -42,11 +42,6 @@ int32_t ADS1220::readData() {
     b2 = SPI.transfer(0x00);
     digitalWrite(_cs_pin, HIGH);
 
-    //Serial.printf(
-    //"RX: %02X %02X %02X\n",
-    //b0, b1, b2
-    //);
-
     int32_t adc = (int32_t)b0 << 16 | (int32_t)b1 << 8 | (int32_t)b2;
 
     // Sign-extend 24-bit to 32-bit
@@ -57,34 +52,6 @@ int32_t ADS1220::readData() {
     return adc;
 }
 
-/*
-int32_t ADS1220::readData() {
-    digitalWrite(_cs_pin, LOW);
-    delayMicroseconds(1);
-
-    uint8_t b0 = SPI.transfer(0x00);
-    uint8_t b1 = SPI.transfer(0x00);
-    uint8_t b2 = SPI.transfer(0x00);
-
-    digitalWrite(_cs_pin, HIGH);
-
-    Serial.printf(
-        "RX: %02X %02X %02X\n",
-        b0, b1, b2
-    );
-
-    int32_t raw =
-        ((int32_t)b0 << 16) |
-        ((int32_t)b1 << 8) |
-        b2;
-
-    if (raw & 0x800000) {
-        raw |= 0xFF000000;
-    }
-
-    return raw;
-}
-*/
 float ADS1220::readDataCalibrated(float loadcell_cal) {
     return (readData() - _lc_offset) * loadcell_cal;
 }
