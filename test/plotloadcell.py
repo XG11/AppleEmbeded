@@ -12,95 +12,149 @@ def plot_loadcell(csv_path: Path, remove_offset: bool):
     print("CSV columns:")
     print(list(df.columns))
 
-    # Find the time column.
-    if "host_elapsed_s" in df.columns:
-        time_s = pd.to_numeric(
-            df["host_elapsed_s"],
-            errors="coerce",
-        ).to_numpy()
-
-    elif "host_elapsed_ms" in df.columns:
-        time_s = (
-            pd.to_numeric(
-                df["host_elapsed_ms"],
-                errors="coerce",
-            ).to_numpy()
-            / 1000.0
-        )
-
-    else:
-        raise ValueError(
-            "CSV must contain either "
-            "'host_elapsed_s' or 'host_elapsed_ms'."
-        )
-
-    # Find the load-cell data column.
-    possible_value_columns = [
-        "loadcell_raw",
-        "loadcell",
-        "modified_weight",
-        "weight",
-        "raw",
+    # ---------------------------------------------------------
+    # Check required columns
+    # ---------------------------------------------------------
+    required_columns = [
+        "host_elapsed_s",
+        "type",
+        "load_cell_raw",
     ]
 
-    value_column = None
+    missing = [
+        column
+        for column in required_columns
+        if column not in df.columns
+    ]
 
-    for column in possible_value_columns:
-        if column in df.columns:
-            value_column = column
-            break
-
-    if value_column is None:
+    if missing:
         raise ValueError(
-            "Could not find the load-cell column. "
-            f"Expected one of: {possible_value_columns}"
+            f"Missing required columns: {missing}"
         )
 
-    loadcell = pd.to_numeric(
-        df[value_column],
-        errors="coerce",
-    ).to_numpy()
+    # ---------------------------------------------------------
+    # Keep ONLY load-cell rows
+    # ---------------------------------------------------------
+    loadcell_df = df[
+        df["type"].astype(str).str.lower() == "loadcell"
+    ].copy()
 
-    # Remove invalid rows.
-    valid = np.isfinite(time_s) & np.isfinite(loadcell)
+    if len(loadcell_df) == 0:
+        raise ValueError(
+            "No rows with type='loadcell' were found."
+        )
+
+    # ---------------------------------------------------------
+    # Convert columns to numeric
+    # ---------------------------------------------------------
+    time_s = pd.to_numeric(
+        loadcell_df["host_elapsed_s"],
+        errors="coerce",
+    ).to_numpy(dtype=np.float64)
+
+    loadcell = pd.to_numeric(
+        loadcell_df["load_cell_raw"],
+        errors="coerce",
+    ).to_numpy(dtype=np.float64)
+
+    # ---------------------------------------------------------
+    # Remove invalid rows
+    # ---------------------------------------------------------
+    valid = (
+        np.isfinite(time_s)
+        & np.isfinite(loadcell)
+    )
 
     time_s = time_s[valid]
     loadcell = loadcell[valid]
 
     if len(time_s) == 0:
-        raise ValueError("No valid load-cell samples found.")
+        raise ValueError(
+            "No valid load-cell samples found."
+        )
 
-    # Make the plot begin at t = 0.
+    # ---------------------------------------------------------
+    # Start plot time at t = 0
+    # ---------------------------------------------------------
     time_s = time_s - time_s[0]
 
+    # ---------------------------------------------------------
+    # Optional baseline removal
+    # ---------------------------------------------------------
     if remove_offset:
-        baseline_sample_count = min(100, len(loadcell))
+        baseline_sample_count = min(
+            100,
+            len(loadcell),
+        )
 
         baseline = np.mean(
             loadcell[:baseline_sample_count]
         )
 
-        plotted_loadcell = loadcell - baseline
-        ylabel = "Load-cell reading minus baseline"
+        plotted_loadcell = (
+            loadcell - baseline
+        )
 
-        print(f"Removed baseline: {baseline:.3f}")
+        ylabel = (
+            "Load-cell raw reading minus baseline"
+        )
+
+        print(
+            f"Removed baseline: {baseline:.3f}"
+        )
 
     else:
         plotted_loadcell = loadcell
-        ylabel = value_column
+        ylabel = "Load-cell raw ADC reading"
 
+    # ---------------------------------------------------------
+    # Calculate average sampling rate
+    # ---------------------------------------------------------
     duration_s = time_s[-1]
 
     if duration_s > 0 and len(time_s) > 1:
-        sample_rate = (len(time_s) - 1) / duration_s
+        sample_rate = (
+            (len(time_s) - 1)
+            / duration_s
+        )
     else:
         sample_rate = 0.0
 
-    print(f"Samples:             {len(time_s)}")
-    print(f"Duration:            {duration_s:.3f} s")
-    print(f"Average sample rate: {sample_rate:.2f} SPS")
+    # Also calculate timing statistics.
+    if len(time_s) > 1:
+        dt = np.diff(time_s)
 
-    fig, ax = plt.subplots(figsize=(13, 6))
+        valid_dt = dt[dt > 0]
+
+        if len(valid_dt) > 0:
+            median_rate = (
+                1.0 / np.median(valid_dt)
+            )
+        else:
+            median_rate = 0.0
+    else:
+        median_rate = 0.0
+
+    print()
+    print(
+        f"Load-cell samples:    {len(time_s)}"
+    )
+    print(
+        f"Duration:             {duration_s:.3f} s"
+    )
+    print(
+        f"Average sample rate:  {sample_rate:.2f} SPS"
+    )
+    print(
+        f"Median sample rate:   {median_rate:.2f} SPS"
+    )
+
+    # ---------------------------------------------------------
+    # Plot
+    # ---------------------------------------------------------
+    fig, ax = plt.subplots(
+        figsize=(13, 6)
+    )
 
     ax.plot(
         time_s,
@@ -109,51 +163,79 @@ def plot_loadcell(csv_path: Path, remove_offset: bool):
     )
 
     ax.set_title(
-        f"Load-cell data — {sample_rate:.1f} SPS"
+        f"Load-cell data — "
+        f"{sample_rate:.1f} SPS"
     )
 
-    ax.set_xlabel("Elapsed time (s)")
-    ax.set_ylabel(ylabel)
-    ax.grid(True, alpha=0.3)
+    ax.set_xlabel(
+        "Elapsed time (s)"
+    )
 
-    # Displays precise values when moving the cursor.
+    ax.set_ylabel(
+        ylabel
+    )
+
+    ax.grid(
+        True,
+        alpha=0.3,
+    )
+
+    # Show precise values in bottom-right corner
+    # when moving the mouse.
     ax.format_coord = lambda x, y: (
-        f"time = {x:.6f} s, load cell = {y:.3f}"
+        f"time = {x:.6f} s, "
+        f"load cell = {y:.3f}"
     )
 
     fig.tight_layout()
 
-    print("\nPlot controls:")
-    print("  Magnifying glass: zoom into a selected region")
-    print("  Hand:              pan")
-    print("  Home:              reset view")
-    print("  Back/forward:      navigate previous views")
+    print()
+    print("Plot controls:")
+    print(
+        "  Magnifying glass: zoom into a selected region"
+    )
+    print(
+        "  Hand:              pan"
+    )
+    print(
+        "  Home:              reset view"
+    )
+    print(
+        "  Back/forward:      navigate previous views"
+    )
 
     plt.show()
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Plot recorded load-cell CSV data."
+        description=(
+            "Plot load-cell readings from "
+            "combined IMU/load-cell CSV."
+        )
     )
 
     parser.add_argument(
         "csv",
         type=Path,
-        help="Path to the load-cell CSV file",
+        help="Path to imu_loadcell.csv",
     )
 
     parser.add_argument(
         "--remove-offset",
         action="store_true",
-        help="Subtract the mean of the first 100 samples",
+        help=(
+            "Subtract the mean of the first "
+            "100 load-cell samples"
+        ),
     )
 
     args = parser.parse_args()
 
     if not args.csv.exists():
         raise FileNotFoundError(
-            f"CSV file does not exist: {args.csv}"
+            f"CSV file does not exist: "
+            f"{args.csv}"
         )
 
     plot_loadcell(

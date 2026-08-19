@@ -132,7 +132,7 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Record a synchronized multimodal session containing "
-            "LSM6DSO32 IMU data, ADS1220 load-cell data, piezo data, "
+            "LSM6DSO32 IMU data, ADS1220 load-cell data, "
             "GelSight video, and USB microphone audio."
         )
     )
@@ -169,25 +169,25 @@ def parse_arguments() -> argparse.Namespace:
     )
 
     # -----------------------------------------------------------------
-    # Piezo Teensy
+    # Piezo Teensy (DISABLED)
     # -----------------------------------------------------------------
 
-    parser.add_argument(
-        "--piezo-port",
-        type=str,
-        default=None,
-        help="Serial port for the piezo Teensy.",
-    )
+    # parser.add_argument(
+    #     "--piezo-port",
+    #     type=str,
+    #     default=None,
+    #     help="Serial port for the piezo Teensy.",
+    # )
 
-    parser.add_argument(
-        "--piezo-baud",
-        type=int,
-        default=2_000_000,
-        help=(
-            "Baud rate for the piezo Teensy. "
-            "Default: 2000000."
-        ),
-    )
+    # parser.add_argument(
+    #     "--piezo-baud",
+    #     type=int,
+    #     default=2_000_000,
+    #     help=(
+    #         "Baud rate for the piezo Teensy. "
+    #         "Default: 2000000."
+    #     ),
+    # )
 
     # -----------------------------------------------------------------
     # GelSight
@@ -299,102 +299,141 @@ def parse_arguments() -> argparse.Namespace:
 # Port selection
 # ---------------------------------------------------------------------
 
-def resolve_teensy_ports(
+def resolve_teensy_port(
     imu_port: Optional[str],
-    piezo_port: Optional[str],
-) -> Tuple[str, str]:
+) -> str:
     """
-    Resolve the two Teensy serial ports.
+    Resolve the IMU + ADS1220 Teensy serial port.
 
-    Explicit command-line ports are preferred. Automatic assignment is
-    only performed when both ports are omitted and exactly two Teensy
-    devices are detected.
-
-    USB enumeration order is not guaranteed, so explicit port arguments
-    are recommended.
+    An explicit command-line port is preferred. If it is omitted,
+    automatic assignment is only performed when exactly one Teensy
+    device is detected.
     """
 
-    # Both ports were supplied explicitly.
-    if imu_port is not None and piezo_port is not None:
-        if imu_port == piezo_port:
-            raise ValueError(
-                "The IMU/ADS1220 recorder and piezo recorder "
-                "cannot use the same serial port."
-            )
-
-        return imu_port, piezo_port
+    if imu_port is not None:
+        return imu_port
 
     teensy_ports = find_teensy_ports()
 
-    # Neither port was supplied.
-    if imu_port is None and piezo_port is None:
-        if len(teensy_ports) != 2:
-            raise RuntimeError(
-                f"Expected exactly 2 Teensy devices, "
-                f"but found {len(teensy_ports)}.\n"
-                f"Detected Teensy ports: {teensy_ports}\n"
-                "Specify the ports explicitly using:\n"
-                "  --imu-port PORT --piezo-port PORT"
-            )
-
-        print(
-            "\nWarning: assigning Teensy ports according to "
-            "USB enumeration order."
+    if len(teensy_ports) != 1:
+        raise RuntimeError(
+            f"Expected exactly 1 Teensy device, "
+            f"but found {len(teensy_ports)}.\n"
+            f"Detected Teensy ports: {teensy_ports}\n"
+            "Specify the port explicitly using:\n"
+            "  --imu-port PORT"
         )
 
-        print(
-            f"  IMU + ADS1220: {teensy_ports[0]}"
-        )
-
-        print(
-            f"  Piezo:         {teensy_ports[1]}"
-        )
-
-        print(
-            "Use explicit --imu-port and --piezo-port arguments "
-            "if these assignments are incorrect."
-        )
-
-        return teensy_ports[0], teensy_ports[1]
-
-    # One port was supplied and the other must be resolved.
-    used_port = (
-        imu_port
-        if imu_port is not None
-        else piezo_port
+    print(
+        "\nAutomatically selected Teensy port:"
+    )
+    print(
+        f"  IMU + ADS1220: {teensy_ports[0]}"
     )
 
-    candidates = [
-        port
-        for port in teensy_ports
-        if port != used_port
-    ]
+    return teensy_ports[0]
 
-    if len(candidates) != 1:
-        missing_name = (
-            "--imu-port"
-            if imu_port is None
-            else "--piezo-port"
-        )
 
-        raise RuntimeError(
-            f"Could not uniquely determine {missing_name}.\n"
-            f"Detected Teensy ports: {teensy_ports}\n"
-            "Specify both ports explicitly."
-        )
+# ---------------------------------------------------------------------
+# OLD TWO-TEENSY PORT RESOLUTION (DISABLED WITH PIEZO)
+# ---------------------------------------------------------------------
 
-    if imu_port is None:
-        imu_port = candidates[0]
-    else:
-        piezo_port = candidates[0]
-
-    if imu_port == piezo_port:
-        raise ValueError(
-            "The IMU/ADS1220 recorder and piezo recorder "
-            "cannot use the same serial port."
-        )
-
-    return imu_port, piezo_port
+# def resolve_teensy_ports(
+#     imu_port: Optional[str],
+#     piezo_port: Optional[str],
+# ) -> Tuple[str, str]:
+#     """
+#     Resolve the two Teensy serial ports.
+#
+#     Explicit command-line ports are preferred. Automatic assignment is
+#     only performed when both ports are omitted and exactly two Teensy
+#     devices are detected.
+#
+#     USB enumeration order is not guaranteed, so explicit port arguments
+#     are recommended.
+#     """
+#
+#     # Both ports were supplied explicitly.
+#     if imu_port is not None and piezo_port is not None:
+#         if imu_port == piezo_port:
+#             raise ValueError(
+#                 "The IMU/ADS1220 recorder and piezo recorder "
+#                 "cannot use the same serial port."
+#             )
+#
+#         return imu_port, piezo_port
+#
+#     teensy_ports = find_teensy_ports()
+#
+#     # Neither port was supplied.
+#     if imu_port is None and piezo_port is None:
+#         if len(teensy_ports) != 2:
+#             raise RuntimeError(
+#                 f"Expected exactly 2 Teensy devices, "
+#                 f"but found {len(teensy_ports)}.\n"
+#                 f"Detected Teensy ports: {teensy_ports}\n"
+#                 "Specify the ports explicitly using:\n"
+#                 "  --imu-port PORT --piezo-port PORT"
+#             )
+#
+#         print(
+#             "\nWarning: assigning Teensy ports according to "
+#             "USB enumeration order."
+#         )
+#
+#         print(
+#             f"  IMU + ADS1220: {teensy_ports[0]}"
+#         )
+#
+#         print(
+#             f"  Piezo:         {teensy_ports[1]}"
+#         )
+#
+#         print(
+#             "Use explicit --imu-port and --piezo-port arguments "
+#             "if these assignments are incorrect."
+#         )
+#
+#         return teensy_ports[0], teensy_ports[1]
+#
+#     # One port was supplied and the other must be resolved.
+#     used_port = (
+#         imu_port
+#         if imu_port is not None
+#         else piezo_port
+#     )
+#
+#     candidates = [
+#         port
+#         for port in teensy_ports
+#         if port != used_port
+#     ]
+#
+#     if len(candidates) != 1:
+#         missing_name = (
+#             "--imu-port"
+#             if imu_port is None
+#             else "--piezo-port"
+#         )
+#
+#         raise RuntimeError(
+#             f"Could not uniquely determine {missing_name}.\n"
+#             f"Detected Teensy ports: {teensy_ports}\n"
+#             "Specify both ports explicitly."
+#         )
+#
+#     if imu_port is None:
+#         imu_port = candidates[0]
+#     else:
+#         piezo_port = candidates[0]
+#
+#     if imu_port == piezo_port:
+#         raise ValueError(
+#             "The IMU/ADS1220 recorder and piezo recorder "
+#             "cannot use the same serial port."
+#         )
+#
+#     return imu_port, piezo_port
 
 
 # ---------------------------------------------------------------------
@@ -414,10 +453,11 @@ def validate_arguments(
             "--imu-baud must be greater than zero."
         )
 
-    if args.piezo_baud <= 0:
-        raise ValueError(
-            "--piezo-baud must be greater than zero."
-        )
+    # Piezo validation disabled because piezo recording is disabled.
+    # if args.piezo_baud <= 0:
+    #     raise ValueError(
+    #         "--piezo-baud must be greater than zero."
+    #     )
 
     if args.audio_rate <= 0:
         raise ValueError(
@@ -460,18 +500,23 @@ def main() -> None:
 
     validate_arguments(args)
 
-    imu_port, piezo_port = resolve_teensy_ports(
+    imu_port = resolve_teensy_port(
         imu_port=args.imu_port,
-        piezo_port=args.piezo_port,
     )
+
+    # Old piezo port resolution (disabled).
+    # imu_port, piezo_port = resolve_teensy_ports(
+    #     imu_port=args.imu_port,
+    #     piezo_port=args.piezo_port,
+    # )
 
     print("\nSelected devices")
     print(
         f"  IMU + ADS1220 Teensy: {imu_port}"
     )
-    print(
-        f"  Piezo Teensy:         {piezo_port}"
-    )
+    # print(
+    #     f"  Piezo Teensy:         {piezo_port}"
+    # )
     print(
         f"  GelSight camera:      {args.camera}"
     )
@@ -486,9 +531,9 @@ def main() -> None:
         imu_port=imu_port,
         imu_baud=args.imu_baud,
 
-        # Separate piezo Teensy.
-        piezo_port=piezo_port,
-        piezo_baud=args.piezo_baud,
+        # Separate piezo Teensy (disabled).
+        # piezo_port=piezo_port,
+        # piezo_baud=args.piezo_baud,
 
         # GelSight camera.
         camera_index=args.camera,

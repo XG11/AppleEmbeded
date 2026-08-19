@@ -8,7 +8,7 @@ from typing import Optional
 from .gelsight import GelSightRecorder
 from .imu_loadcell import IMULoadCellRecorder
 from .microphone import MicrophoneRecorder
-from .piezo import PiezoRecorder
+# from .piezo import PiezoRecorder
 from .shared import SharedRecordingState, monotonic_ns
 
 
@@ -17,7 +17,7 @@ class RecordingSession:
         self,
         duration_s: float,
         imu_port: str,
-        piezo_port: str,
+        #piezo_port: str,
         rode_audio_device: Optional[int],
         camera_index: int,
         output_root: Path = Path("recordings"),
@@ -37,8 +37,8 @@ class RecordingSession:
         self.imu_baud = imu_baud
 
         # Piezo uses a separate Teensy serial port.
-        self.piezo_port = piezo_port
-        self.piezo_baud = piezo_baud
+        #self.piezo_port = piezo_port
+        #self.piezo_baud = piezo_baud
 
         self.camera_index = camera_index
         self.camera_width = camera_width
@@ -66,9 +66,9 @@ class RecordingSession:
             IMULoadCellRecorder
         ] = None
 
-        self.piezo_recorder: Optional[
-            PiezoRecorder
-        ] = None
+        #self.piezo_recorder: Optional[
+        #    PiezoRecorder
+        #] = None
 
         self.gelsight_recorder: Optional[
             GelSightRecorder
@@ -93,15 +93,15 @@ class RecordingSession:
             ),
         )
 
-        self.piezo_recorder = PiezoRecorder(
-            state=self.state,
-            serial_port=self.piezo_port,
-            baud_rate=self.piezo_baud,
-            output_path=(
-                self.session_dir
-                / "piezo.csv"
-            ),
-        )
+        # self.piezo_recorder = PiezoRecorder(
+        #     state=self.state,
+        #     serial_port=self.piezo_port,
+        #     baud_rate=self.piezo_baud,
+        #     output_path=(
+        #         self.session_dir
+        #         / "piezo.csv"
+        #     ),
+        # )
 
         self.gelsight_recorder = GelSightRecorder(
             state=self.state,
@@ -139,7 +139,7 @@ class RecordingSession:
     def _recorders(self):
         recorders = [
             self.imu_recorder,
-            self.piezo_recorder,
+            #self.piezo_recorder,
             self.gelsight_recorder,
             self.rode_recorder,
         ]
@@ -293,11 +293,11 @@ class RecordingSession:
                 },
             },
 
-            "piezo": {
-                "serial_port": self.piezo_port,
-                "baud_rate": self.piezo_baud,
-                "output_file": "piezo.csv",
-            },
+            # "piezo": {
+            #     "serial_port": self.piezo_port,
+            #     "baud_rate": self.piezo_baud,
+            #     "output_file": "piezo.csv",
+            # },
 
             "gelsight": {
                 "camera_index": (
@@ -420,10 +420,10 @@ class RecordingSession:
                 "IMU/HX711 recorder was not initialized."
             )
 
-        if self.piezo_recorder is None:
-            raise RuntimeError(
-                "Piezo recorder was not initialized."
-            )
+        #if self.piezo_recorder is None:
+         #   raise RuntimeError(
+          #      "Piezo recorder was not initialized."
+           # )
 
         if self.gelsight_recorder is None:
             raise RuntimeError(
@@ -477,15 +477,15 @@ class RecordingSession:
             self.rode_recorder,
         )
 
-        print(
-            "Piezo samples: "
-            f"{self.piezo_recorder.sample_count}"
-        )
+        # print(
+        #     "Piezo samples: "
+        #     f"{self.piezo_recorder.sample_count}"
+        # )
 
-        print(
-            "Piezo invalid lines: "
-            f"{self.piezo_recorder.invalid_line_count}"
-        )
+        # print(
+        #     "Piezo invalid lines: "
+        #     f"{self.piezo_recorder.invalid_line_count}"
+        # )
 
         print(
             f"\nSaved to: {self.session_dir}"
@@ -519,15 +519,15 @@ class RecordingSession:
             f"{self.imu_baud}"
         )
 
-        print(
-            f"Piezo port: "
-            f"{self.piezo_port}"
-        )
+        # print(
+        #     f"Piezo port: "
+        #     f"{self.piezo_port}"
+        # )
 
-        print(
-            f"Piezo baud: "
-            f"{self.piezo_baud}"
-        )
+        # print(
+        #     f"Piezo baud: "
+        #     f"{self.piezo_baud}"
+        # )
 
         print(
             f"Camera index: "
