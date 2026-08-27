@@ -11,6 +11,10 @@ BAUD_RATE = 2_000_000
 TRIAL_DURATION_S = 65.0
 
 
+# ============================================================
+# WAIT FOR SESSION START
+# ============================================================
+
 def wait_for_session_start(port: str):
     """
     Open the Teensy serial port and wait until the firmware sends:
@@ -64,33 +68,24 @@ def wait_for_session_start(port: str):
             if line == "SESSION_START":
                 print()
                 print("Session trigger received.")
-                print("Yellow LED should now be blinking.")
+                print("Recording started.")
                 return
 
 
-def get_last_result(port: str):
+# ============================================================
+# SERIAL COMMAND HELPER
+# ============================================================
+
+def send_command_and_wait_for_prefix(
+    port: str,
+    command: str,
+    expected_prefix: str,
+    timeout_s: float = 3.0,
+):
     """
-    Reconnect to Teensy after record_multimodal exits and ask
-    for the result that the firmware stored.
-
-    New firmware response format:
-
-        LAST_RESULT,SUCCESS,first_full_connect_ms,confirmed_success_ms
-
-    or:
-
-        LAST_RESULT,FAIL,first_full_connect_ms,-1
-
-    first_full_connect_ms:
-        First instant all four connector pins were simultaneously
-        connected. No dwell-time confirmation.
-
-    confirmed_success_ms:
-        Original label: all four pins remained connected for the
-        configured SUCCESS_CONFIRM_MS (currently 200 ms).
+    Reconnect to the Teensy, send one command, and return the
+    first response line beginning with expected_prefix.
     """
-
-    time.sleep(0.5)
 
     with serial.Serial(
         port,
@@ -103,10 +98,14 @@ def get_last_result(port: str):
         ser.reset_input_buffer()
 
         ser.write(
-            b"GET_LAST_RESULT\n"
+            f"{command}\n".encode("utf-8")
         )
 
-        deadline = time.time() + 3.0
+        ser.flush()
+
+        deadline = (
+            time.time() + timeout_s
+        )
 
         while time.time() < deadline:
             raw = ser.readline()
@@ -119,77 +118,467 @@ def get_last_result(port: str):
                 errors="ignore",
             ).strip()
 
-            if not line.startswith(
-                "LAST_RESULT,"
+            if not line:
+                continue
+
+            print(
+                f"[controller query] {line}"
+            )
+
+            if line.startswith(
+                expected_prefix
             ):
-                continue
+                return line
 
-            parts = line.split(",")
+    return None
 
-            if len(parts) < 2:
-                continue
 
-            result = parts[1]
+# ============================================================
+# GET LAST TRIAL SUMMARY
+# ============================================================
 
-            if result == "NONE":
-                return {
-                    "label": "unknown",
-                    "first_full_connect_time_ms": None,
-                    "success_time_ms": None,
-                }
+def get_last_result(port: str):
+    """
+    Query the basic result of the most recent trial.
 
-            if result not in ("SUCCESS", "FAIL"):
-                continue
+    Expected new firmware format:
 
-            first_full_connect_time_ms = None
-            success_time_ms = None
+        LAST_RESULT,SUCCESS,first_full_connect_ms,success_count
 
-            # New firmware format.
-            if len(parts) >= 4:
-                try:
-                    first_ms = int(parts[2])
-                    confirmed_ms = int(parts[3])
+    Example:
 
-                    if first_ms >= 0:
-                        first_full_connect_time_ms = first_ms
+        LAST_RESULT,SUCCESS,12431,3
 
-                    if confirmed_ms >= 0:
-                        success_time_ms = confirmed_ms
+    Failure example:
 
-                except ValueError:
-                    pass
+        LAST_RESULT,FAIL,-1,0
+    """
 
-            # Backward compatibility with the previous firmware:
-            # LAST_RESULT,SUCCESS,success_time_ms
-            elif len(parts) >= 3 and result == "SUCCESS":
-                try:
-                    old_success_ms = int(parts[2])
+    time.sleep(0.5)
 
-                    if old_success_ms >= 0:
-                        success_time_ms = old_success_ms
+    line = send_command_and_wait_for_prefix(
+        port=port,
+        command="GET_LAST_RESULT",
+        expected_prefix="LAST_RESULT,",
+    )
 
-                except ValueError:
-                    pass
+    if line is None:
+        return {
+            "label": "unknown",
+            "first_full_connect_time_ms": None,
+            "success_count": 0,
+        }
 
-            return {
-                "label": (
-                    "success"
-                    if result == "SUCCESS"
-                    else "fail"
-                ),
-                "first_full_connect_time_ms":
-                    first_full_connect_time_ms,
-                "success_time_ms": success_time_ms,
-            }
+    parts = line.split(",")
+
+    if len(parts) < 2:
+        return {
+            "label": "unknown",
+            "first_full_connect_time_ms": None,
+            "success_count": 0,
+        }
+
+    result = parts[1]
+
+
+    # --------------------------------------------------------
+    # No stored trial
+    # --------------------------------------------------------
+
+    if result == "NONE":
+        return {
+            "label": "unknown",
+            "first_full_connect_time_ms": None,
+            "success_count": 0,
+        }
+
+
+    # --------------------------------------------------------
+    # Invalid response
+    # --------------------------------------------------------
+
+    if result not in (
+        "SUCCESS",
+        "FAIL",
+    ):
+        return {
+            "label": "unknown",
+            "first_full_connect_time_ms": None,
+            "success_count": 0,
+        }
+
+
+    first_full_connect_time_ms = None
+    success_count = 0
+
+
+    # --------------------------------------------------------
+    # New firmware:
+    #
+    # LAST_RESULT,
+    # SUCCESS|FAIL,
+    # first_full_connect_ms,
+    # success_count
+    # --------------------------------------------------------
+
+    if len(parts) >= 4:
+
+        try:
+            first_ms = int(parts[2])
+
+            if first_ms >= 0:
+                first_full_connect_time_ms = (
+                    first_ms
+                )
+
+        except ValueError:
+            pass
+
+
+        try:
+            success_count = int(
+                parts[3]
+            )
+
+        except ValueError:
+            success_count = 0
+
 
     return {
-        "label": "unknown",
-        "first_full_connect_time_ms": None,
-        "success_time_ms": None,
+        "label": (
+            "success"
+            if result == "SUCCESS"
+            else "fail"
+        ),
+
+        "first_full_connect_time_ms":
+            first_full_connect_time_ms,
+
+        "success_count":
+            success_count,
     }
 
 
-def get_session_directories(recordings_dir: Path):
+# ============================================================
+# GET ALL SUCCESS TIMESTAMPS
+# ============================================================
+
+def get_success_times(port: str):
+    """
+    Query all successful insertion timestamps.
+
+    Expected firmware response:
+
+        SUCCESS_TIMES,count,t1,t2,t3,...
+
+    Example:
+
+        SUCCESS_TIMES,3,12431,27840,47102
+
+    These timestamps represent the START of the fully connected
+    state that was later verified by SUCCESS_CONFIRM_MS.
+    """
+
+    time.sleep(0.2)
+
+    line = send_command_and_wait_for_prefix(
+        port=port,
+        command="GET_SUCCESS_TIMES",
+        expected_prefix="SUCCESS_TIMES,",
+    )
+
+    if line is None:
+        return []
+
+
+    parts = line.split(",")
+
+
+    # Expected at least:
+    #
+    # SUCCESS_TIMES,0
+    #
+    if len(parts) < 2:
+        return []
+
+
+    # --------------------------------------------------------
+    # No previous result
+    # --------------------------------------------------------
+
+    if parts[1] == "NONE":
+        return []
+
+
+    # --------------------------------------------------------
+    # Parse count
+    # --------------------------------------------------------
+
+    try:
+        count = int(
+            parts[1]
+        )
+
+    except ValueError:
+        return []
+
+
+    if count <= 0:
+        return []
+
+
+    # --------------------------------------------------------
+    # Parse timestamps
+    # --------------------------------------------------------
+
+    success_times = []
+
+    for value in parts[2:]:
+
+        try:
+            timestamp_ms = int(
+                value
+            )
+
+        except ValueError:
+            continue
+
+
+        if timestamp_ms >= 0:
+            success_times.append(
+                timestamp_ms
+            )
+
+
+    # Firmware count and actual received values should agree.
+    #
+    # If for some reason fewer values are received, keep the
+    # values that were successfully parsed instead of failing.
+
+    if len(success_times) != count:
+        print(
+            "WARNING: firmware reported "
+            f"{count} success events, but "
+            f"{len(success_times)} timestamps "
+            "were received."
+        )
+
+
+    return success_times
+
+
+# ============================================================
+# OPTIONAL: GET CONFIRMATION TIMES
+# ============================================================
+
+def get_success_confirm_times(
+    port: str,
+):
+    """
+    Query timestamps corresponding to when each successful
+    insertion passed the SUCCESS_CONFIRM_MS dwell time.
+
+    Expected firmware response:
+
+        SUCCESS_CONFIRM_TIMES,count,t1,t2,t3,...
+
+    These are normally about 200 ms after success_times_ms.
+
+    They are kept for debugging / analysis, but the insertion
+    event labels should normally use success_times_ms.
+    """
+
+    time.sleep(0.2)
+
+    line = send_command_and_wait_for_prefix(
+        port=port,
+        command="GET_SUCCESS_CONFIRM_TIMES",
+        expected_prefix=(
+            "SUCCESS_CONFIRM_TIMES,"
+        ),
+    )
+
+    if line is None:
+        return []
+
+
+    parts = line.split(",")
+
+    if len(parts) < 2:
+        return []
+
+
+    if parts[1] == "NONE":
+        return []
+
+
+    try:
+        count = int(
+            parts[1]
+        )
+
+    except ValueError:
+        return []
+
+
+    if count <= 0:
+        return []
+
+
+    confirm_times = []
+
+    for value in parts[2:]:
+
+        try:
+            timestamp_ms = int(
+                value
+            )
+
+        except ValueError:
+            continue
+
+
+        if timestamp_ms >= 0:
+            confirm_times.append(
+                timestamp_ms
+            )
+
+
+    if len(confirm_times) != count:
+        print(
+            "WARNING: firmware reported "
+            f"{count} confirmation events, but "
+            f"{len(confirm_times)} timestamps "
+            "were received."
+        )
+
+
+    return confirm_times
+
+
+# ============================================================
+# GET ALL LABEL INFORMATION
+# ============================================================
+
+def get_trial_result(port: str):
+    """
+    Retrieve complete connector labeling information for the
+    most recently completed trial.
+    """
+
+    summary = get_last_result(
+        port
+    )
+
+
+    # --------------------------------------------------------
+    # If no valid trial was stored, don't continue querying.
+    # --------------------------------------------------------
+
+    if summary["label"] == "unknown":
+
+        return {
+            "label": "unknown",
+
+            "first_full_connect_time_ms":
+                None,
+
+            "success_count":
+                0,
+
+            "success_times_ms":
+                [],
+
+            "success_confirm_times_ms":
+                [],
+        }
+
+
+    # --------------------------------------------------------
+    # Get all confirmed insertion event timestamps
+    # --------------------------------------------------------
+
+    success_times = get_success_times(
+        port
+    )
+
+
+    # --------------------------------------------------------
+    # Also retrieve confirmation times
+    # --------------------------------------------------------
+
+    success_confirm_times = (
+        get_success_confirm_times(
+            port
+        )
+    )
+
+
+    # --------------------------------------------------------
+    # Use actual timestamp count as final count.
+    # --------------------------------------------------------
+
+    actual_count = len(
+        success_times
+    )
+
+
+    firmware_count = summary[
+        "success_count"
+    ]
+
+
+    if firmware_count != actual_count:
+
+        print(
+            "WARNING: LAST_RESULT reported "
+            f"{firmware_count} successes, but "
+            f"GET_SUCCESS_TIMES returned "
+            f"{actual_count}."
+        )
+
+
+    # Determine label from the actual event list.
+    #
+    # If at least one confirmed insertion occurred:
+    #     success
+    #
+    # Otherwise:
+    #     fail
+
+    label = (
+        "success"
+        if actual_count > 0
+        else "fail"
+    )
+
+
+    return {
+        "label": label,
+
+        "first_full_connect_time_ms":
+            summary[
+                "first_full_connect_time_ms"
+            ],
+
+        "success_count":
+            actual_count,
+
+        "success_times_ms":
+            success_times,
+
+        "success_confirm_times_ms":
+            success_confirm_times,
+    }
+
+
+# ============================================================
+# SESSION DIRECTORY HELPERS
+# ============================================================
+
+def get_session_directories(
+    recordings_dir: Path,
+):
     if not recordings_dir.exists():
         return set()
 
@@ -208,71 +597,137 @@ def find_new_session_directory(
         recordings_dir
     )
 
-    new_dirs = after - before
+    new_dirs = (
+        after - before
+    )
 
     if not new_dirs:
         return None
 
-    # If there is somehow more than one, use the newest.
+
+    # If there is somehow more than one,
+    # use the newest.
     return max(
         new_dirs,
         key=lambda p: p.stat().st_mtime,
     )
 
 
+# ============================================================
+# SAVE LABEL
+# ============================================================
+
 def save_label(
     session_dir: Path,
     result: dict,
 ):
     """
-    Save BOTH connector timing labels.
+    Save all successful insertion timestamps.
 
-    first_full_connect_time_ms:
-        First instant all four connector pins are connected.
+    success_times_ms:
+        Ground-truth insertion event timestamps.
 
-    success_time_ms:
-        Original / older label: full connection confirmed after
-        200 ms continuous contact.
+        Each timestamp corresponds to the moment all four
+        connector contacts first became connected for an
+        insertion that subsequently remained connected for at
+        least SUCCESS_CONFIRM_MS.
+
+    success_confirm_times_ms:
+        Time at which the dwell-time confirmation completed.
+
+        Useful for debugging, but normally NOT the ground-truth
+        event timestamp used for ML training.
     """
 
     metadata = {
-        "label": result["label"],
 
-        # New label.
+        # ----------------------------------------------------
+        # Overall session label
+        # ----------------------------------------------------
+
+        "label":
+            result["label"],
+
+
+        # ----------------------------------------------------
+        # Number of successful insertions
+        # ----------------------------------------------------
+
+        "success_count":
+            result["success_count"],
+
+
+        # ----------------------------------------------------
+        # ALL successful insertion timestamps
+        # ----------------------------------------------------
+
+        "success_times_ms":
+            result["success_times_ms"],
+
+
+        # ----------------------------------------------------
+        # Confirmation timestamps
+        # ----------------------------------------------------
+
+        "success_confirm_times_ms":
+            result[
+                "success_confirm_times_ms"
+            ],
+
+
+        # ----------------------------------------------------
+        # First instant all 4 contacts ever became connected.
+        #
+        # This may represent an unconfirmed / brief connection.
+        # ----------------------------------------------------
+
         "first_full_connect_time_ms":
-            result["first_full_connect_time_ms"],
+            result[
+                "first_full_connect_time_ms"
+            ],
 
-        # Keep the old field name so existing analysis code can
-        # continue using it without changes.
-        "success_time_ms":
-            result["success_time_ms"],
 
-        "trial_duration_s": TRIAL_DURATION_S,
+        # ----------------------------------------------------
+        # Trial metadata
+        # ----------------------------------------------------
+
+        "trial_duration_s":
+            TRIAL_DURATION_S,
     }
+
 
     output_path = (
         session_dir /
         "connector_label.json"
     )
 
+
     with open(
         output_path,
         "w",
         encoding="utf-8",
     ) as f:
+
         json.dump(
             metadata,
             f,
             indent=4,
         )
 
+
     print(
         f"Saved label: {output_path}"
     )
 
 
+# ============================================================
+# MAIN
+# ============================================================
+
 def main():
+
     parser = argparse.ArgumentParser()
+
 
     parser.add_argument(
         "--controller-port",
@@ -283,11 +738,16 @@ def main():
         ),
     )
 
+
     parser.add_argument(
         "--recordings-dir",
         default="recordings",
-        help="Directory used by record_multimodal.py",
+        help=(
+            "Directory used by "
+            "record_multimodal.py"
+        ),
     )
+
 
     parser.add_argument(
         "recorder_command",
@@ -298,17 +758,27 @@ def main():
         ),
     )
 
+
     args = parser.parse_args()
+
 
     recordings_dir = Path(
         args.recordings_dir
     )
 
-    command = args.recorder_command
 
-    # argparse keeps "--" as the first argument sometimes.
-    if command and command[0] == "--":
+    command = (
+        args.recorder_command
+    )
+
+
+    # argparse may keep "--" as the first argument.
+    if (
+        command and
+        command[0] == "--"
+    ):
         command = command[1:]
+
 
     if not command:
         raise ValueError(
@@ -316,6 +786,10 @@ def main():
             "record_multimodal.py command."
         )
 
+
+    # ========================================================
+    # CONTINUOUS TRIAL LOOP
+    # ========================================================
 
     while True:
 
@@ -340,16 +814,20 @@ def main():
 
 
         # ====================================================
-        # START ORIGINAL RECORDER
+        # START MULTIMODAL RECORDER
         # ====================================================
 
         print()
-        print("Starting multimodal recorder...")
+        print(
+            "Starting multimodal recorder..."
+        )
         print()
+
 
         print(
             " ".join(command)
         )
+
 
         subprocess.run(
             command,
@@ -358,50 +836,98 @@ def main():
 
 
         print()
-        print("Recording finished.")
+        print(
+            "Recording finished."
+        )
 
 
         # ====================================================
         # QUERY CONNECTOR LABELS
         # ====================================================
 
-        result = get_last_result(
+        result = get_trial_result(
             args.controller_port
         )
 
+
+        print()
         print(
-            f"Trial result: {result['label'].upper()}"
+            "========================================"
         )
 
+        print(
+            f"Trial result: "
+            f"{result['label'].upper()}"
+        )
+
+
+        # ----------------------------------------------------
+        # First raw full connection
+        # ----------------------------------------------------
 
         first_time = result[
             "first_full_connect_time_ms"
         ]
 
+
         if first_time is not None:
+
             print(
                 "First full connection at "
                 f"{first_time / 1000:.3f} s"
             )
+
         else:
+
             print(
-                "First full connection: not detected"
+                "First full connection: "
+                "not detected"
             )
 
 
-        confirmed_time = result[
-            "success_time_ms"
+        # ----------------------------------------------------
+        # Successful insertions
+        # ----------------------------------------------------
+
+        success_times = result[
+            "success_times_ms"
         ]
 
-        if confirmed_time is not None:
+
+        print(
+            f"Successful insertions: "
+            f"{len(success_times)}"
+        )
+
+
+        if success_times:
+
             print(
-                "Confirmed connector success at "
-                f"{confirmed_time / 1000:.3f} s"
+                "Successful insertion times:"
             )
+
+
+            for index, timestamp_ms in enumerate(
+                success_times,
+                start=1,
+            ):
+
+                print(
+                    f"  {index}: "
+                    f"{timestamp_ms / 1000:.3f} s"
+                )
+
         else:
+
             print(
-                "Confirmed connector success: not detected"
+                "Successful insertion times: "
+                "none"
             )
+
+
+        print(
+            "========================================"
+        )
 
 
         # ====================================================
@@ -417,28 +943,51 @@ def main():
 
 
         if session_dir is None:
+
             print(
                 "WARNING: could not determine "
                 "new recording directory."
             )
 
+
         else:
+
             save_label(
                 session_dir,
                 result,
             )
+
 
             print(
                 f"Session: {session_dir}"
             )
 
 
+        # ====================================================
+        # READY FOR NEXT TRIAL
+        # ====================================================
+
         print()
-        print("========================================")
-        print("TRIAL COMPLETE")
-        print("Green LED should be flashing again.")
-        print("Ready for next button press.")
-        print("========================================")
+        print(
+            "========================================"
+        )
+
+        print(
+            "TRIAL COMPLETE"
+        )
+
+        print(
+            "Green LED should be flashing again."
+        )
+
+        print(
+            "Ready for next button press."
+        )
+
+        print(
+            "========================================"
+        )
+
         print()
 
 
