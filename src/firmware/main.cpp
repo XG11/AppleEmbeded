@@ -25,6 +25,16 @@ static constexpr uint8_t IMU_CS_PIN = 10;
 static constexpr uint8_t ADS1220_CS_PIN = 9;
 static constexpr uint8_t ADS1220_DRDY_PIN = 8;
 
+// Manual event-mark button.
+//
+// Wiring:
+// Pin 22 ---- button ---- 3.3 V
+//
+// Internal pull-down keeps the pin LOW when the button is open.
+static constexpr uint8_t MARK_BUTTON_PIN = 22;
+
+static constexpr unsigned long MARK_BUTTON_DEBOUNCE_MS = 30;
+
 // ============================================================================
 // ADS1220 settings
 // ============================================================================
@@ -74,6 +84,14 @@ static bool haveNewAccel = false;
 static bool haveNewGyro = false;
 
 // ============================================================================
+// Mark button state
+// ============================================================================
+
+static bool markButtonStableState = false;
+static bool markButtonLastReading = false;
+static unsigned long markButtonLastChangeMs = 0;
+
+// ============================================================================
 // Function declarations
 // ============================================================================
 
@@ -82,6 +100,7 @@ void initializeAds1220();
 
 void serviceImu();
 void serviceAds1220();
+void serviceMarkButton();
 
 void printImuPacket(uint32_t timestampUs);
 
@@ -89,6 +108,8 @@ void printLoadCellPacket(
     uint32_t timestampUs,
     int32_t rawValue
 );
+
+void printButtonPacket(uint32_t timestampUs);
 
 void printAds1220Register(
     const char *name,
@@ -233,6 +254,11 @@ void setup()
         INPUT
     );
 
+    pinMode(
+        MARK_BUTTON_PIN,
+        INPUT_PULLDOWN
+    );
+
     delay(10);
 
     SPI.begin();
@@ -255,6 +281,11 @@ void setup()
         " L,timestamp_us,load_cell_raw"
     );
 
+    Serial.println(
+        "# Button packet:"
+        " B,timestamp_us"
+    );
+
     Serial.println("# START");
 }
 
@@ -269,6 +300,8 @@ void loop()
     serviceImu();
 
     serviceAds1220();
+
+    serviceMarkButton();
 }
 
 // ============================================================================
@@ -600,6 +633,37 @@ void serviceImu()
 }
 
 // ============================================================================
+// Mark button service
+// ============================================================================
+
+void serviceMarkButton()
+{
+    const bool reading =
+        digitalRead(MARK_BUTTON_PIN) == HIGH;
+
+    if (reading != markButtonLastReading)
+    {
+        markButtonLastChangeMs = millis();
+        markButtonLastReading = reading;
+    }
+
+    if (
+        millis() - markButtonLastChangeMs
+            >= MARK_BUTTON_DEBOUNCE_MS
+        && reading != markButtonStableState
+    )
+    {
+        markButtonStableState = reading;
+
+        // Only report the press, not the release.
+        if (markButtonStableState)
+        {
+            printButtonPacket(micros());
+        }
+    }
+}
+
+// ============================================================================
 // Output
 // ============================================================================
 
@@ -639,4 +703,12 @@ void printLoadCellPacket(
     Serial.print(',');
 
     Serial.println(rawValue);
+}
+
+void printButtonPacket(
+    uint32_t timestampUs
+)
+{
+    Serial.print("B,");
+    Serial.println(timestampUs);
 }

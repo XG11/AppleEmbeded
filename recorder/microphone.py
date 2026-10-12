@@ -82,11 +82,43 @@ class MicrophoneRecorder:
                 "Audio queue overflow",
             )
 
+    def _resolve_device_index(self) -> Optional[int]:
+        """Auto-detect a RODE input device when no explicit index was given.
+
+        The OS-wide default input device can silently change (e.g. a
+        monitor or other device becomes the system default), so falling
+        back to it is unreliable for a named device like the RODE mic.
+        """
+        if self.device_index is not None or "rode" not in self.name.lower():
+            return self.device_index
+
+        devices = sd.query_devices()
+        candidates = [
+            index
+            for index, info in enumerate(devices)
+            if ("rode" in str(info["name"]).lower()
+                or "røde" in str(info["name"]).lower())
+            and int(info["max_input_channels"]) > 0
+        ]
+        # "RODE Connect" entries are virtual routing devices created by the
+        # RODE Connect app, not the physical microphone itself; prefer the
+        # actual hardware mic when both are present.
+        hardware_matches = [
+            index for index in candidates
+            if "connect" not in str(devices[index]["name"]).lower()
+        ]
+        if len(hardware_matches) == 1:
+            return hardware_matches[0]
+        if len(candidates) == 1:
+            return candidates[0]
+        return self.device_index
+
     def _run(self) -> None:
         try:
             self.wav_path.parent.mkdir(parents=True, exist_ok=True)
             self.timestamp_path.parent.mkdir(parents=True, exist_ok=True)
 
+            self.device_index = self._resolve_device_index()
             device_info = sd.query_devices(self.device_index, "input")
             self.actual_device_name = str(device_info["name"])
 

@@ -1,4 +1,5 @@
 import argparse
+import csv
 import json
 import subprocess
 import time
@@ -614,12 +615,61 @@ def find_new_session_directory(
 
 
 # ============================================================
+# BUTTON PRESS TIMES
+# ============================================================
+
+def get_button_press_times_s(session_dir: Path):
+    """
+    Read the manual mark-button press timestamps out of
+    imu_loadcell.csv.
+
+    These are logged on the main sensing Teensy's serial stream
+    as "button" rows and timestamped in host_elapsed_s -- the
+    same clock used for every other column in that CSV, and for
+    the microphone/GelSight timestamp files. This is a different
+    clock than success_times_ms below, which comes from the
+    station controller's own millis() clock.
+    """
+
+    imu_csv_path = (
+        session_dir / "imu_loadcell.csv"
+    )
+
+    if not imu_csv_path.exists():
+        return []
+
+    button_press_times_s = []
+
+    with imu_csv_path.open(
+        newline="",
+        encoding="utf-8",
+    ) as f:
+
+        reader = csv.DictReader(f)
+
+        for row in reader:
+            if row.get("type") != "button":
+                continue
+
+            try:
+                button_press_times_s.append(
+                    float(row["host_elapsed_s"])
+                )
+
+            except (KeyError, ValueError):
+                continue
+
+    return button_press_times_s
+
+
+# ============================================================
 # SAVE LABEL
 # ============================================================
 
 def save_label(
     session_dir: Path,
     result: dict,
+    button_press_times_s=None,
 ):
     """
     Save all successful insertion timestamps.
@@ -637,6 +687,12 @@ def save_label(
 
         Useful for debugging, but normally NOT the ground-truth
         event timestamp used for ML training.
+
+    button_press_times_s:
+        Operator mark-button press times, in host_elapsed_s --
+        the same clock as imu_loadcell.csv, the microphone, and
+        GelSight timestamps. NOT the same clock as
+        success_times_ms (see get_button_press_times_s).
     """
 
     metadata = {
@@ -685,6 +741,17 @@ def save_label(
             result[
                 "first_full_connect_time_ms"
             ],
+
+
+        # ----------------------------------------------------
+        # Operator mark-button presses.
+        #
+        # host_elapsed_s clock -- see get_button_press_times_s
+        # and imu_loadcell.csv, NOT the *_ms fields above.
+        # ----------------------------------------------------
+
+        "button_press_times_s":
+            button_press_times_s or [],
 
 
         # ----------------------------------------------------
@@ -952,9 +1019,23 @@ def main():
 
         else:
 
+            button_press_times_s = (
+                get_button_press_times_s(
+                    session_dir
+                )
+            )
+
             save_label(
                 session_dir,
                 result,
+                button_press_times_s=(
+                    button_press_times_s
+                ),
+            )
+
+            print(
+                f"Button presses: "
+                f"{len(button_press_times_s)}"
             )
 
 

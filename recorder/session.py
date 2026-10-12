@@ -260,6 +260,7 @@ class RecordingSession:
                     "host_time_ns",
                     "host_elapsed_s",
                     "teensy_time_us",
+                    "type",
                     "acc_x_raw",
                     "acc_y_raw",
                     "acc_z_raw",
@@ -268,6 +269,17 @@ class RecordingSession:
                     "gyro_z_raw",
                     "load_cell_raw",
                 ],
+
+                "button_configuration": {
+                    "pin": 22,
+                    "wiring": "pin pulled down, button ties pin to 3.3V",
+                    "packet_type": "button",
+                    "description": (
+                        "One row is written per button press "
+                        "(rising edge only), marking the moment "
+                        "the operator started pushing down."
+                    ),
+                },
 
                 "accelerometer_configuration": {
                     "device": "LSM6DSO32",
@@ -460,6 +472,11 @@ class RecordingSession:
         print(
             "  Invalid serial lines: "
             f"{self.imu_recorder.invalid_line_count}"
+        )
+
+        print(
+            "  Button marks: "
+            f"{self.imu_recorder.button_count}"
         )
 
         print(

@@ -26,6 +26,10 @@ class IMULoadCellRecorder:
 
         L,timestamp_us,load_cell_raw
 
+    Button packet:
+
+        B,timestamp_us
+
     Output CSV
     ----------
 
@@ -68,6 +72,7 @@ class IMULoadCellRecorder:
         self.accel_count = 0
         self.gyro_count = 0
         self.load_cell_count = 0
+        self.button_count = 0
 
         # ADS1220 readings at the positive or negative 24-bit limit.
         self.load_cell_saturation_count = 0
@@ -239,6 +244,42 @@ class IMULoadCellRecorder:
                 "load_cell_raw": load_cell_raw,
             }
 
+        # ------------------------------------------------------------------
+        # Button packet
+        # ------------------------------------------------------------------
+        #
+        # B,timestamp_us
+        #
+        # Total fields: 2
+
+        if packet_type == "B":
+            if len(fields) != 2:
+                return None
+
+            try:
+                teensy_time_us = int(fields[1])
+            except ValueError:
+                return None
+
+            if not (
+                0
+                <= teensy_time_us
+                <= 0xFFFFFFFF
+            ):
+                return None
+
+            return {
+                "type": "button",
+                "teensy_time_us": teensy_time_us,
+                "acc_x_raw": "",
+                "acc_y_raw": "",
+                "acc_z_raw": "",
+                "gyro_x_raw": "",
+                "gyro_y_raw": "",
+                "gyro_z_raw": "",
+                "load_cell_raw": "",
+            }
+
         return None
 
     def _run(self) -> None:
@@ -353,6 +394,9 @@ class IMULoadCellRecorder:
                             8_388_607,
                         ):
                             self.load_cell_saturation_count += 1
+
+                    elif parsed["type"] == "button":
+                        self.button_count += 1
 
                 csv_file.flush()
 
