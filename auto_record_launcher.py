@@ -4,12 +4,161 @@ import json
 import subprocess
 import time
 from pathlib import Path
+from typing import List, Optional
 
 import serial
+from serial.tools import list_ports
+
+from mms101.continuous_stream import ContinuousForceTorqueStreamer
+from mms101.mms101_read import AXES
+
+
+# ============================================================
+# Continuous trial loop for the station controller + button
+# workflow.
+#
+# On startup, this powers on, warms up (~5 minutes by default --
+# see --ft-warmup-seconds), and tares the MMS101 force/torque
+# sensor once, *before* waiting for the first button press --
+# then keeps it STREAMING CONTINUOUSLY (mms101/continuous_stream.py)
+# for the whole trial loop, rather than each trial starting and
+# stopping its own stream. Restarting the stream per trial was
+# found to leave a visible warm-up-like transient in Fz at the
+# start of later trials; streaming continuously sidesteps that.
+#
+# Each physical button press on the station controller still
+# triggers exactly one recording trial via the recorder_command
+# (normally `python3 record_multimodal.py ... --ft-external`,
+# with --ft-external appended automatically below so that
+# subprocess does not also try to open the F/T serial port).
+# After the trial finishes, the samples that fall inside its time
+# window are sliced out of the continuous stream's buffer and
+# written to that trial's own force_torque.csv.
+#
+# Pass --skip-ft-warmup to go straight to streaming, reusing
+# whatever --ft-tare-file already has on disk (e.g. after a
+# restart later the same session) instead of redoing the 5-minute
+# warm-up.
+#
+# Since this process holds the F/T sensor's serial port open for
+# the whole session, mms101_plot.py cannot also open it to watch
+# live. Instead, this continuously rewrites a small rolling
+# snapshot file (--live-snapshot-file, default
+# mms101/live_snapshot.csv) that `python mms101/live_view.py`,
+# run in a second terminal, polls for a live plot -- pass
+# --no-live-snapshot to turn that off.
+#
+# The sensor can also be rezeroed mid-session (e.g. after
+# remounting a tool) without stopping the stream: pressing 't' in
+# live_view.py (or touching --retare-request-file directly)
+# recomputes the tare from recent buffered samples and updates
+# --ft-tare-file in place -- pass --no-retare to disable this.
+# ============================================================
 
 
 BAUD_RATE = 2_000_000
 TRIAL_DURATION_S = 65.0
+
+
+# ============================================================
+# FORCE/TORQUE SENSOR PORT RESOLUTION
+# ============================================================
+
+def find_force_torque_ports() -> List[str]:
+    """
+    Find serial ports that appear to belong to the MMS101 Evakit1,
+    which enumerates as an FTDI USB-serial adapter.
+    """
+    ports: List[str] = []
+
+    for port in list_ports.comports():
+        description = (port.description or "").lower()
+        manufacturer = (port.manufacturer or "").lower()
+
+        if (
+            port.vid == 0x0403
+            or "ftdi" in description
+            or "ftdi" in manufacturer
+        ):
+            ports.append(port.device)
+
+    return ports
+
+
+def resolve_ft_port(ft_port: Optional[str]) -> str:
+    if ft_port is not None:
+        return ft_port
+
+    candidate_ports = find_force_torque_ports()
+
+    if len(candidate_ports) != 1:
+        raise RuntimeError(
+            f"Expected exactly 1 force/torque sensor device, "
+            f"but found {len(candidate_ports)}.\n"
+            f"Detected FTDI ports: {candidate_ports}\n"
+            "Specify the port explicitly using:\n"
+            "  --ft-port PORT"
+        )
+
+    print("\nAutomatically selected force/torque sensor port:")
+    print(f"  MMS101: {candidate_ports[0]}")
+
+    return candidate_ports[0]
+
+
+# ============================================================
+# PER-TRIAL FORCE/TORQUE EXTRACTION
+# ============================================================
+
+def write_force_torque_csv(
+    streamer: ContinuousForceTorqueStreamer,
+    session_dir: Path,
+) -> int:
+    """
+    Slice this trial's time window out of the continuous stream's
+    buffer and write it to session_dir/force_torque.csv, in the same
+    format recorder/force_torque.py uses for a standalone recording.
+
+    Returns the number of rows written.
+    """
+
+    metadata_path = session_dir / "metadata.json"
+
+    if not metadata_path.exists():
+        print(
+            "WARNING: no metadata.json in "
+            f"{session_dir}; cannot extract force/torque data."
+        )
+        return 0
+
+    metadata = json.loads(metadata_path.read_text())
+
+    start_ns = metadata["host_monotonic_start_ns"]
+    duration_s = metadata["requested_duration_s"]
+    end_ns = start_ns + int(duration_s * 1_000_000_000)
+
+    rows = streamer.extract_window(start_ns, end_ns)
+
+    output_path = session_dir / "force_torque.csv"
+
+    with output_path.open("w", newline="") as csv_file:
+        writer = csv.writer(csv_file)
+
+        writer.writerow(
+            ["host_time_ns", "host_elapsed_s", "device_time_us"] + AXES
+        )
+
+        for host_time_ns, device_time_us, tared_values in rows:
+            host_elapsed_s = (host_time_ns - start_ns) / 1_000_000_000.0
+
+            writer.writerow(
+                [host_time_ns, f"{host_elapsed_s:.9f}", device_time_us]
+                + [f"{value:.6f}" for value in tared_values]
+            )
+
+    print(f"Force/torque samples: {len(rows)} -> {output_path}")
+
+    return len(rows)
 
 
 # ============================================================
@@ -800,8 +949,8 @@ def main():
         "--controller-port",
         required=True,
         help=(
-            "Teensy port used for IMU/load-cell "
-            "and session controller"
+            "Teensy port for the station controller "
+            "(SESSION_START / button / LEDs / connector sensing)."
         ),
     )
 
@@ -813,6 +962,160 @@ def main():
             "Directory used by "
             "record_multimodal.py"
         ),
+    )
+
+
+    parser.add_argument(
+        "--ft-port",
+        default=None,
+        help=(
+            "Serial port for the MMS101 force/torque sensor, streamed "
+            "continuously for the whole trial loop. "
+            "Auto-detected if omitted."
+        ),
+    )
+
+
+    parser.add_argument(
+        "--ft-tare-file",
+        default="mms101/tare_offsets.json",
+        help=(
+            "Where the one-time warm-up/tare saves its zero offsets "
+            "(read back on --skip-ft-warmup). "
+            "Default: mms101/tare_offsets.json."
+        ),
+    )
+
+
+    parser.add_argument(
+        "--ft-interval",
+        type=int,
+        default=1000,
+        help=(
+            "MMS101 sample interval in microseconds. "
+            "Default: 1000 (1 kHz)."
+        ),
+    )
+
+
+    parser.add_argument(
+        "--ft-restart",
+        type=int,
+        default=10,
+        help=(
+            "MMS101 temperature-correction refresh interval, in "
+            "samples. Default: 100."
+        ),
+    )
+
+
+    parser.add_argument(
+        "--ft-warmup-seconds",
+        type=float,
+        default=600.0,
+        help=(
+            "How long to stream the force/torque sensor before "
+            "taring, in seconds, at startup. Default: 300 (5 min)."
+        ),
+    )
+
+
+    parser.add_argument(
+        "--ft-tare-samples",
+        type=int,
+        default=500,
+        help=(
+            "Number of samples to average for the zero offset at "
+            "startup. Default: 500."
+        ),
+    )
+
+
+    parser.add_argument(
+        "--skip-ft-warmup",
+        action="store_true",
+        help=(
+            "Skip the startup power-on/warm-up/tare and go straight "
+            "to continuous streaming, reusing whatever --ft-tare-file "
+            "already has on disk (e.g. restarting this script later "
+            "the same session)."
+        ),
+    )
+
+
+    parser.add_argument(
+        "--live-snapshot-file",
+        default="mms101/live_snapshot.csv",
+        help=(
+            "Rolling snapshot of the last few seconds of force/torque "
+            "data, rewritten continuously so mms101/live_view.py can "
+            "show a live plot in another terminal without opening the "
+            "sensor's serial port itself. "
+            "Default: mms101/live_snapshot.csv."
+        ),
+    )
+
+
+    parser.add_argument(
+        "--no-live-snapshot",
+        action="store_true",
+        help="Do not write the live-snapshot file at all.",
+    )
+
+
+    parser.add_argument(
+        "--live-snapshot-interval",
+        type=float,
+        default=0.1,
+        help=(
+            "How often to rewrite the live-snapshot file, in seconds. "
+            "Total lag in mms101/live_view.py is roughly this plus "
+            "its own --refresh-ms poll interval (not synchronized). "
+            "Default: 0.1."
+        ),
+    )
+
+
+    parser.add_argument(
+        "--live-snapshot-window",
+        type=float,
+        default=2.0,
+        help=(
+            "How many trailing seconds of data to include in each "
+            "live-snapshot write. A bigger window costs more I/O per "
+            "write without making the latest point any fresher. "
+            "Default: 2.0."
+        ),
+    )
+
+
+    parser.add_argument(
+        "--retare-request-file",
+        default="mms101/retare_request.flag",
+        help=(
+            "Touched (e.g. by pressing 't' in mms101/live_view.py) to "
+            "request a mid-session re-tare of the force/torque sensor "
+            "-- rezeros using recent buffered samples without "
+            "stopping the stream. Default: mms101/retare_request.flag."
+        ),
+    )
+
+
+    parser.add_argument(
+        "--retare-samples",
+        type=int,
+        default=500,
+        help=(
+            "Number of recent samples to average when a re-tare is "
+            "requested. Default: 500."
+        ),
+    )
+
+
+    parser.add_argument(
+        "--no-retare",
+        action="store_true",
+        help="Disable mid-session re-taring entirely.",
     )
 
 
@@ -855,9 +1158,104 @@ def main():
 
 
     # ========================================================
+    # START CONTINUOUS FORCE/TORQUE STREAMING
+    # ========================================================
+
+    ft_port = resolve_ft_port(args.ft_port)
+
+    streamer = ContinuousForceTorqueStreamer(
+        port=ft_port,
+        interval_us=args.ft_interval,
+        restart_samples=args.ft_restart,
+    )
+
+    if args.skip_ft_warmup:
+        tare_path = Path(args.ft_tare_file)
+
+        if not tare_path.exists():
+            raise RuntimeError(
+                f"--skip-ft-warmup was given, but {tare_path} "
+                "does not exist. Run without --skip-ft-warmup once, "
+                "or point --ft-tare-file at an existing tare file."
+            )
+
+        print(f"\nSkipping warm-up; reusing tare from {tare_path}.")
+        tare_data = json.loads(tare_path.read_text())
+        streamer.start_with_existing_tare(tare_data)
+    else:
+        print()
+        print("========================================")
+        print("WARMING UP FORCE/TORQUE SENSOR")
+        print("========================================")
+        print()
+
+        tare_data = streamer.warm_up_and_start(
+            warmup_seconds=args.ft_warmup_seconds,
+            tare_samples=args.ft_tare_samples,
+        )
+
+        tare_path = Path(args.ft_tare_file)
+        tare_path.parent.mkdir(parents=True, exist_ok=True)
+        tare_path.write_text(json.dumps(tare_data, indent=2))
+        print(f"\nSaved tare offsets to {tare_path}")
+
+    print(
+        "Force/torque sensor is now streaming continuously "
+        "for the whole trial loop."
+    )
+
+    if not args.no_live_snapshot:
+        streamer.start_live_snapshot(
+            args.live_snapshot_file,
+            window_seconds=args.live_snapshot_window,
+            interval_seconds=args.live_snapshot_interval,
+        )
+        print(
+            f"Live snapshot: {args.live_snapshot_file} "
+            "(view with: python mms101/live_view.py)"
+        )
+
+    if not args.no_retare:
+        streamer.start_retare_watcher(
+            args.retare_request_file,
+            tare_file_path=args.ft_tare_file,
+            sample_count=args.retare_samples,
+        )
+        print(
+            "Mid-session re-tare armed: touch "
+            f"{args.retare_request_file} to rezero "
+            "(or press 't' in mms101/live_view.py)."
+        )
+
+    # recorder_command's own subprocess must not also open the F/T
+    # serial port -- it is already held open by this process.
+    command = command + ["--ft-external"]
+
+
+    # ========================================================
     # CONTINUOUS TRIAL LOOP
     # ========================================================
 
+    try:
+        run_trial_loop(
+            controller_port=args.controller_port,
+            recordings_dir=recordings_dir,
+            command=command,
+            streamer=streamer,
+        )
+    except KeyboardInterrupt:
+        print("\nStopped.")
+    finally:
+        print("\nStopping force/torque stream...")
+        streamer.close()
+
+
+def run_trial_loop(
+    controller_port: str,
+    recordings_dir: Path,
+    command: List[str],
+    streamer: ContinuousForceTorqueStreamer,
+) -> None:
     while True:
 
         # ====================================================
@@ -865,7 +1263,7 @@ def main():
         # ====================================================
 
         wait_for_session_start(
-            args.controller_port
+            controller_port
         )
 
 
@@ -913,7 +1311,7 @@ def main():
         # ====================================================
 
         result = get_trial_result(
-            args.controller_port
+            controller_port
         )
 
 
@@ -1018,6 +1416,11 @@ def main():
 
 
         else:
+
+            write_force_torque_csv(
+                streamer,
+                session_dir,
+            )
 
             button_press_times_s = (
                 get_button_press_times_s(

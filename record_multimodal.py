@@ -36,6 +36,27 @@ def find_teensy_ports() -> List[str]:
     return ports
 
 
+def find_force_torque_ports() -> List[str]:
+    """
+    Find serial ports that appear to belong to the MMS101 Evakit1, which
+    enumerates as an FTDI USB-serial adapter rather than a Teensy.
+    """
+    ports: List[str] = []
+
+    for port in list_ports.comports():
+        description = (port.description or "").lower()
+        manufacturer = (port.manufacturer or "").lower()
+
+        if (
+            port.vid == 0x0403
+            or "ftdi" in description
+            or "ftdi" in manufacturer
+        ):
+            ports.append(port.device)
+
+    return ports
+
+
 def list_serial_devices() -> None:
     """
     Print available serial devices.
@@ -132,7 +153,7 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Record a synchronized multimodal session containing "
-            "LSM6DSO32 IMU data, ADS1220 load-cell data, "
+            "LSM6DSO32 IMU data, MMS101 6-axis force/torque data, "
             "GelSight video, and USB microphone audio."
         )
     )
@@ -154,7 +175,7 @@ def parse_arguments() -> argparse.Namespace:
         default=None,
         help=(
             "Serial port for the Teensy that records the "
-            "LSM6DSO32 IMU and ADS1220 load cell."
+            "LSM6DSO32 IMU and the manual mark button."
         ),
     )
 
@@ -163,8 +184,72 @@ def parse_arguments() -> argparse.Namespace:
         type=int,
         default=2_000_000,
         help=(
-            "Baud rate for the combined IMU/ADS1220 Teensy. "
+            "Baud rate for the combined IMU/button Teensy. "
             "Default: 2000000."
+        ),
+    )
+
+    # -----------------------------------------------------------------
+    # MMS101 force/torque sensor
+    # -----------------------------------------------------------------
+
+    parser.add_argument(
+        "--ft-port",
+        type=str,
+        default=None,
+        help=(
+            "Serial port for the MMS101 Evakit1 force/torque "
+            "sensor (FTDI USB-serial). Auto-detected if omitted. "
+            "Ignored when --ft-external is given."
+        ),
+    )
+
+    parser.add_argument(
+        "--ft-external",
+        action="store_true",
+        help=(
+            "Do not open the force/torque sensor's serial port at "
+            "all -- it is already being streamed continuously by an "
+            "external process (auto_record_launcher.py's "
+            "mms101/continuous_stream.py), which writes "
+            "force_torque.csv into this session's directory itself "
+            "after this process exits."
+        ),
+    )
+
+    parser.add_argument(
+        "--ft-tare-file",
+        type=str,
+        default="mms101/tare_offsets.json",
+        help=(
+            "Zero-tare offsets saved by mms101/warmup_and_tare.py. "
+            "Default: mms101/tare_offsets.json."
+        ),
+    )
+
+    parser.add_argument(
+        "--ft-interval",
+        type=int,
+        default=1000,
+        help=(
+            "Sample interval in microseconds the MMS101 was "
+            "configured with during warm-up (mms101/warmup_and_tare.py "
+            "--interval). Not sent to the sensor here -- only used to "
+            "warn if it does not match --ft-tare-file. Default: 1000 "
+            "(1 kHz)."
+        ),
+    )
+
+    parser.add_argument(
+        "--ft-restart",
+        type=int,
+        default=100,
+        help=(
+            "Temperature-correction refresh interval, in samples, the "
+            "MMS101 was configured with during warm-up "
+            "(mms101/warmup_and_tare.py --restart). Not sent to the "
+            "sensor here -- only used to warn if it does not match "
+            "--ft-tare-file. Default: 100."
         ),
     )
 
@@ -328,10 +413,45 @@ def resolve_teensy_port(
         "\nAutomatically selected Teensy port:"
     )
     print(
-        f"  IMU + ADS1220: {teensy_ports[0]}"
+        f"  IMU + button: {teensy_ports[0]}"
     )
 
     return teensy_ports[0]
+
+
+def resolve_ft_port(
+    ft_port: Optional[str],
+) -> str:
+    """
+    Resolve the MMS101 force/torque sensor serial port.
+
+    An explicit command-line port is preferred. If it is omitted,
+    automatic assignment is only performed when exactly one FTDI
+    USB-serial device is detected.
+    """
+
+    if ft_port is not None:
+        return ft_port
+
+    candidate_ports = find_force_torque_ports()
+
+    if len(candidate_ports) != 1:
+        raise RuntimeError(
+            f"Expected exactly 1 force/torque sensor device, "
+            f"but found {len(candidate_ports)}.\n"
+            f"Detected FTDI ports: {candidate_ports}\n"
+            "Specify the port explicitly using:\n"
+            "  --ft-port PORT"
+        )
+
+    print(
+        "\nAutomatically selected force/torque sensor port:"
+    )
+    print(
+        f"  MMS101: {candidate_ports[0]}"
+    )
+
+    return candidate_ports[0]
 
 
 # ---------------------------------------------------------------------
@@ -453,6 +573,16 @@ def validate_arguments(
             "--imu-baud must be greater than zero."
         )
 
+    if args.ft_interval <= 0:
+        raise ValueError(
+            "--ft-interval must be greater than zero."
+        )
+
+    if args.ft_restart < 0:
+        raise ValueError(
+            "--ft-restart must not be negative."
+        )
+
     # Piezo validation disabled because piezo recording is disabled.
     # if args.piezo_baud <= 0:
     #     raise ValueError(
@@ -510,13 +640,23 @@ def main() -> None:
     #     piezo_port=args.piezo_port,
     # )
 
+    ft_port = (
+        None
+        if args.ft_external
+        else resolve_ft_port(ft_port=args.ft_port)
+    )
+
     print("\nSelected devices")
     print(
-        f"  IMU + ADS1220 Teensy: {imu_port}"
+        f"  IMU + button Teensy: {imu_port}"
     )
     # print(
     #     f"  Piezo Teensy:         {piezo_port}"
     # )
+    print(
+        "  Force/torque sensor: "
+        + (ft_port if ft_port else "(external)")
+    )
     print(
         f"  GelSight camera:      {args.camera}"
     )
@@ -527,13 +667,20 @@ def main() -> None:
     session = RecordingSession(
         duration_s=args.duration,
 
-        # Combined LSM6DSO32 + ADS1220 stream.
+        # Combined LSM6DSO32 + button stream.
         imu_port=imu_port,
         imu_baud=args.imu_baud,
 
         # Separate piezo Teensy (disabled).
         # piezo_port=piezo_port,
         # piezo_baud=args.piezo_baud,
+
+        # MMS101 force/torque sensor.
+        ft_enabled=not args.ft_external,
+        ft_port=ft_port,
+        ft_tare_path=Path(args.ft_tare_file),
+        ft_interval_us=args.ft_interval,
+        ft_restart_samples=args.ft_restart,
 
         # GelSight camera.
         camera_index=args.camera,

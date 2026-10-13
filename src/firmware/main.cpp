@@ -1,7 +1,6 @@
 #include <Arduino.h>
 #include <SPI.h>
 
-#include "ADS1220.h"
 #include "lsm6dso32.h"
 
 // ============================================================================
@@ -22,9 +21,6 @@ static constexpr uint32_t SERIAL_BAUD = 2'000'000;
 
 static constexpr uint8_t IMU_CS_PIN = 10;
 
-static constexpr uint8_t ADS1220_CS_PIN = 9;
-static constexpr uint8_t ADS1220_DRDY_PIN = 8;
-
 // Manual event-mark button.
 //
 // Wiring:
@@ -36,30 +32,10 @@ static constexpr uint8_t MARK_BUTTON_PIN = 22;
 static constexpr unsigned long MARK_BUTTON_DEBOUNCE_MS = 30;
 
 // ============================================================================
-// ADS1220 settings
-// ============================================================================
-
-static SPISettings ads1220SpiSettings(
-    1'000'000,
-    MSBFIRST,
-    SPI_MODE1
-);
-
-static constexpr uint8_t ADS1220_REG0 = 0x2E;
-static constexpr uint8_t ADS1220_REG1 = 0xD4;
-
-static constexpr int32_t ADS1220_OFFSET_SAMPLES = 100;
-
-// ============================================================================
 // Sensors
 // ============================================================================
 
 LSM6DSO32 imu(IMU_CS_PIN);
-
-ADS1220 loadCell(
-    ADS1220_CS_PIN,
-    ADS1220_DRDY_PIN
-);
 
 // ============================================================================
 // IMU FIFO tags
@@ -96,115 +72,13 @@ static unsigned long markButtonLastChangeMs = 0;
 // ============================================================================
 
 void initializeImu();
-void initializeAds1220();
 
 void serviceImu();
-void serviceAds1220();
 void serviceMarkButton();
 
 void printImuPacket(uint32_t timestampUs);
 
-void printLoadCellPacket(
-    uint32_t timestampUs,
-    int32_t rawValue
-);
-
 void printButtonPacket(uint32_t timestampUs);
-
-void printAds1220Register(
-    const char *name,
-    uint8_t address,
-    uint8_t expectedValue
-);
-
-// ============================================================================
-// ADS1220 SPI wrappers
-// ============================================================================
-
-void ads1220BeginTransaction()
-{
-    // Make sure the IMU is not selected.
-    digitalWrite(IMU_CS_PIN, HIGH);
-
-    SPI.beginTransaction(ads1220SpiSettings);
-}
-
-void ads1220EndTransaction()
-{
-    digitalWrite(ADS1220_CS_PIN, HIGH);
-
-    SPI.endTransaction();
-}
-
-void ads1220Reset()
-{
-    ads1220BeginTransaction();
-
-    loadCell.reset();
-
-    ads1220EndTransaction();
-}
-
-void ads1220WriteRegister(
-    uint8_t address,
-    uint8_t value
-)
-{
-    ads1220BeginTransaction();
-
-    loadCell.writeRegister(
-        address,
-        value
-    );
-
-    ads1220EndTransaction();
-}
-
-uint8_t ads1220ReadRegister(
-    uint8_t address
-)
-{
-    ads1220BeginTransaction();
-
-    const uint8_t value =
-        loadCell.readRegister(address);
-
-    ads1220EndTransaction();
-
-    return value;
-}
-
-void ads1220StartConversion()
-{
-    ads1220BeginTransaction();
-
-    loadCell.startConversion();
-
-    ads1220EndTransaction();
-}
-
-int32_t ads1220ReadData()
-{
-    ads1220BeginTransaction();
-
-    const int32_t value =
-        loadCell.readData();
-
-    ads1220EndTransaction();
-
-    return value;
-}
-
-void ads1220FindOffset(
-    int32_t sampleCount
-)
-{
-    ads1220BeginTransaction();
-
-    loadCell.findADCOffset(sampleCount);
-
-    ads1220EndTransaction();
-}
 
 // ============================================================================
 // Setup
@@ -227,7 +101,7 @@ void setup()
 
     Serial.println();
     Serial.println("# Teensy booted");
-    Serial.println("# IMU + ADS1220 recorder");
+    Serial.println("# IMU + button recorder");
 
     pinMode(
         IMU_CS_PIN,
@@ -237,21 +111,6 @@ void setup()
     digitalWrite(
         IMU_CS_PIN,
         HIGH
-    );
-
-    pinMode(
-        ADS1220_CS_PIN,
-        OUTPUT
-    );
-
-    digitalWrite(
-        ADS1220_CS_PIN,
-        HIGH
-    );
-
-    pinMode(
-        ADS1220_DRDY_PIN,
-        INPUT
     );
 
     pinMode(
@@ -267,18 +126,11 @@ void setup()
 
     initializeImu();
 
-    initializeAds1220();
-
     Serial.println(
         "# IMU packet:"
         " I,timestamp_us,"
         "acc_x,acc_y,acc_z,"
         "gyro_x,gyro_y,gyro_z"
-    );
-
-    Serial.println(
-        "# Load-cell packet:"
-        " L,timestamp_us,load_cell_raw"
     );
 
     Serial.println(
@@ -295,11 +147,7 @@ void setup()
 
 void loop()
 {
-    serviceAds1220();
-
     serviceImu();
-
-    serviceAds1220();
 
     serviceMarkButton();
 }
@@ -312,11 +160,6 @@ void initializeImu()
 {
     Serial.println(
         "# Initializing LSM6DSO32..."
-    );
-
-    digitalWrite(
-        ADS1220_CS_PIN,
-        HIGH
     );
 
     if (!imu.begin())
@@ -375,190 +218,11 @@ void initializeImu()
 }
 
 // ============================================================================
-// ADS1220 initialization
-// ============================================================================
-
-void initializeAds1220()
-{
-    Serial.println(
-        "# Initializing ADS1220..."
-    );
-
-    digitalWrite(
-        IMU_CS_PIN,
-        HIGH
-    );
-
-    digitalWrite(
-        ADS1220_CS_PIN,
-        HIGH
-    );
-
-    loadCell.begin();
-
-    delay(10);
-
-    ads1220Reset();
-
-    delay(10);
-
-    Serial.println(
-        "# ADS1220 reset complete"
-    );
-
-    ads1220WriteRegister(
-        0x00,
-        ADS1220_REG0
-    );
-
-    ads1220WriteRegister(
-        0x01,
-        ADS1220_REG1
-    );
-
-    Serial.println(
-        "# ADS1220 registers written"
-    );
-
-    printAds1220Register(
-        "Reg0",
-        0x00,
-        ADS1220_REG0
-    );
-
-    printAds1220Register(
-        "Reg1",
-        0x01,
-        ADS1220_REG1
-    );
-
-    ads1220StartConversion();
-
-    Serial.println(
-        "# ADS1220 conversion started"
-    );
-
-    delay(500);
-
-    Serial.print(
-        "# ADS1220 DRDY = "
-    );
-
-    Serial.println(
-        digitalRead(ADS1220_DRDY_PIN)
-    );
-
-    Serial.println(
-        "# Keep load cell unloaded"
-    );
-
-    ads1220FindOffset(
-        ADS1220_OFFSET_SAMPLES
-    );
-
-    Serial.println(
-        "# ADS1220 offset complete"
-    );
-
-    ads1220StartConversion();
-
-    delay(500);
-
-    Serial.println(
-        "# ADS1220 initialized"
-    );
-}
-
-// ============================================================================
-// Register verification
-// ============================================================================
-
-void printAds1220Register(
-    const char *name,
-    uint8_t address,
-    uint8_t expectedValue
-)
-{
-    const uint8_t actualValue =
-        ads1220ReadRegister(address);
-
-    Serial.print("# ADS1220 ");
-    Serial.print(name);
-    Serial.print(" readback = 0x");
-
-    if (actualValue < 0x10)
-    {
-        Serial.print('0');
-    }
-
-    Serial.print(
-        actualValue,
-        HEX
-    );
-
-    Serial.print(", expected = 0x");
-
-    if (expectedValue < 0x10)
-    {
-        Serial.print('0');
-    }
-
-    Serial.print(
-        expectedValue,
-        HEX
-    );
-
-    if (actualValue == expectedValue)
-    {
-        Serial.println(" OK");
-    }
-    else
-    {
-        Serial.println(" MISMATCH");
-    }
-}
-
-// ============================================================================
-// ADS1220 service
-// ============================================================================
-
-void serviceAds1220()
-{
-    // DRDY is active LOW.
-    if (
-        digitalRead(ADS1220_DRDY_PIN)
-        != LOW
-    )
-    {
-        return;
-    }
-
-    delayMicroseconds(10);
-
-    const uint32_t timestampUs =
-        micros();
-
-    const int32_t rawValue =
-        ads1220ReadData();
-
-    printLoadCellPacket(
-        timestampUs,
-        rawValue
-    );
-}
-
-// ============================================================================
 // IMU service
 // ============================================================================
 
 void serviceImu()
 {
-    // Make sure ADS1220 does not drive MISO.
-    digitalWrite(
-        ADS1220_CS_PIN,
-        HIGH
-    );
-
     uint16_t fifoEntryCount =
         imu.fifoCount();
 
@@ -574,11 +238,6 @@ void serviceImu()
         int16_t x = 0;
         int16_t y = 0;
         int16_t z = 0;
-
-        digitalWrite(
-            ADS1220_CS_PIN,
-            HIGH
-        );
 
         const bool success =
             imu.readFifoSample(
@@ -691,18 +350,6 @@ void printImuPacket(
     Serial.print(',');
 
     Serial.println(latestGyroZ);
-}
-
-void printLoadCellPacket(
-    uint32_t timestampUs,
-    int32_t rawValue
-)
-{
-    Serial.print("L,");
-    Serial.print(timestampUs);
-    Serial.print(',');
-
-    Serial.println(rawValue);
 }
 
 void printButtonPacket(

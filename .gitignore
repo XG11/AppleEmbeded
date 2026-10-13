@@ -11,3 +11,7 @@
 recordings/
 sessions/
 data/
+
+mms101/tare_offsets.json
+mms101/live_snapshot.csv.tmp
+mms101/retare_request.flag

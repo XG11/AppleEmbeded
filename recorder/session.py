@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from .force_torque import ForceTorqueRecorder
 from .gelsight import GelSightRecorder
 from .imu_loadcell import IMULoadCellRecorder
 from .microphone import MicrophoneRecorder
@@ -18,11 +19,16 @@ class RecordingSession:
         duration_s: float,
         imu_port: str,
         #piezo_port: str,
+        ft_port: Optional[str],
         rode_audio_device: Optional[int],
         camera_index: int,
         output_root: Path = Path("recordings"),
         imu_baud: int = 2_000_000,
         piezo_baud: int = 2_000_000,
+        ft_enabled: bool = True,
+        ft_tare_path: Path = Path("mms101/tare_offsets.json"),
+        ft_interval_us: int = 1000,
+        ft_restart_samples: int = 100,
         camera_width: int = 0,
         camera_height: int = 0,
         camera_fps: float = 30.0,
@@ -32,13 +38,29 @@ class RecordingSession:
     ) -> None:
         self.duration_s = duration_s
 
-        # IMU + HX711 share one Teensy serial port.
+        # IMU + mark button share one Teensy serial port.
         self.imu_port = imu_port
         self.imu_baud = imu_baud
 
         # Piezo uses a separate Teensy serial port.
         #self.piezo_port = piezo_port
         #self.piezo_baud = piezo_baud
+
+        # MMS101 force/torque sensor, on its own USB-serial (FTDI) port.
+        # Power-on, warm-up, and taring are done once, externally, by
+        # mms101/warmup_and_tare.py -- see recorder/force_torque.py.
+        #
+        # ft_enabled=False means the sensor is handled entirely outside
+        # this process -- auto_record_launcher.py streams it
+        # continuously across the whole trial loop and writes
+        # force_torque.csv itself after this session finishes (see
+        # --ft-external in record_multimodal.py). This process then
+        # never touches the F/T serial port at all.
+        self.ft_enabled = ft_enabled
+        self.ft_port = ft_port
+        self.ft_tare_path = Path(ft_tare_path)
+        self.ft_interval_us = ft_interval_us
+        self.ft_restart_samples = ft_restart_samples
 
         self.camera_index = camera_index
         self.camera_width = camera_width
@@ -69,6 +91,10 @@ class RecordingSession:
         #self.piezo_recorder: Optional[
         #    PiezoRecorder
         #] = None
+
+        self.ft_recorder: Optional[
+            ForceTorqueRecorder
+        ] = None
 
         self.gelsight_recorder: Optional[
             GelSightRecorder
@@ -102,6 +128,19 @@ class RecordingSession:
         #         / "piezo.csv"
         #     ),
         # )
+
+        if self.ft_enabled:
+            self.ft_recorder = ForceTorqueRecorder(
+                state=self.state,
+                serial_port=self.ft_port,
+                tare_path=self.ft_tare_path,
+                expected_interval_us=self.ft_interval_us,
+                expected_restart_samples=self.ft_restart_samples,
+                output_path=(
+                    self.session_dir
+                    / "force_torque.csv"
+                ),
+            )
 
         self.gelsight_recorder = GelSightRecorder(
             state=self.state,
@@ -140,6 +179,7 @@ class RecordingSession:
         recorders = [
             self.imu_recorder,
             #self.piezo_recorder,
+            self.ft_recorder,
             self.gelsight_recorder,
             self.rode_recorder,
         ]
@@ -214,10 +254,112 @@ class RecordingSession:
     # Metadata
     # -----------------------------------------------------------------
 
+    def _force_torque_metadata(self) -> dict:
+        common = {
+            "device": "Mitsumi MMS101",
+            "output_file": "force_torque.csv",
+
+            "csv_columns": [
+                "host_time_ns",
+                "host_elapsed_s",
+                "device_time_us",
+                "Fx",
+                "Fy",
+                "Fz",
+                "Mx",
+                "My",
+                "Mz",
+            ],
+
+            "units": {
+                "Fx": "N",
+                "Fy": "N",
+                "Fz": "N",
+                "Mx": "N*m",
+                "My": "N*m",
+                "Mz": "N*m",
+            },
+
+            "calibrated": True,
+        }
+
+        if not self.ft_enabled:
+            return {
+                **common,
+                "external": True,
+                "serial_port": self.ft_port,
+                "description": (
+                    "Streamed continuously across the whole trial "
+                    "loop by auto_record_launcher.py (see "
+                    "--ft-external), not by this process -- "
+                    "force_torque.csv for this session is written by "
+                    "the launcher after this process exits, by "
+                    "slicing this trial's time window out of that "
+                    "continuous stream."
+                ),
+            }
+
+        tare_metadata = (
+            self.ft_recorder.tare_metadata
+            if self.ft_recorder is not None
+            else None
+        )
+
+        return {
+            **common,
+            "serial_port": self.ft_port,
+            "interval_us": self.ft_interval_us,
+            "restart_samples": self.ft_restart_samples,
+
+            "tare": {
+                "source_file": (
+                    str(self.ft_recorder.tare_path)
+                    if self.ft_recorder is not None
+                    else None
+                ),
+                "offsets": (
+                    self.ft_recorder.tare_offsets
+                    if self.ft_recorder is not None
+                    else None
+                ),
+                "captured_at": (
+                    tare_metadata.get("created_at")
+                    if tare_metadata
+                    else None
+                ),
+                "sample_count": (
+                    tare_metadata.get("sample_count")
+                    if tare_metadata
+                    else None
+                ),
+                "warmup_seconds": (
+                    tare_metadata.get("warmup_seconds")
+                    if tare_metadata
+                    else None
+                ),
+            },
+
+            "description": (
+                "Connected directly to the host over its own "
+                "USB-serial (FTDI) port, independent of the "
+                "IMU/button Teensy. Values are already calibrated "
+                "by the sensor board, and already have the tare "
+                "offsets below subtracted. Power-on, warm-up, "
+                "calibration bootload, and taring were all done "
+                "once by mms101/warmup_and_tare.py before this "
+                "session."
+            ),
+        }
+
     def _write_metadata(
         self,
         wall_start: datetime,
     ) -> None:
+        if self.ft_enabled and self.ft_recorder is None:
+            raise RuntimeError(
+                "Force/torque recorder was not initialized."
+            )
+
         if self.gelsight_recorder is None:
             raise RuntimeError(
                 "GelSight recorder was not initialized."
@@ -298,10 +440,17 @@ class RecordingSession:
                 },
 
                 "load_cell_configuration": {
-                    "adc": "HX711",
+                    "adc": "ADS1220",
                     "raw_range_min": -8_388_608,
                     "raw_range_max": 8_388_607,
                     "calibrated": False,
+                    "removed": True,
+                    "removed_note": (
+                        "The ADS1220 load cell was removed from this "
+                        "Teensy's firmware in favor of the MMS101 "
+                        "force/torque sensor (see the force_torque "
+                        "section below). load_cell_raw is always empty."
+                    ),
                 },
             },
 
@@ -310,6 +459,8 @@ class RecordingSession:
             #     "baud_rate": self.piezo_baud,
             #     "output_file": "piezo.csv",
             # },
+
+            "force_torque": self._force_torque_metadata(),
 
             "gelsight": {
                 "camera_index": (
@@ -437,6 +588,11 @@ class RecordingSession:
           #      "Piezo recorder was not initialized."
            # )
 
+        if self.ft_enabled and self.ft_recorder is None:
+            raise RuntimeError(
+                "Force/torque recorder was not initialized."
+            )
+
         if self.gelsight_recorder is None:
             raise RuntimeError(
                 "GelSight recorder was not initialized."
@@ -478,6 +634,17 @@ class RecordingSession:
             "  Button marks: "
             f"{self.imu_recorder.button_count}"
         )
+
+        if self.ft_enabled:
+            print(
+                "Force/torque samples: "
+                f"{self.ft_recorder.sample_count}"
+            )
+        else:
+            print(
+                "Force/torque: streamed externally by "
+                "auto_record_launcher.py"
+            )
 
         print(
             "GelSight frames: "
@@ -545,6 +712,15 @@ class RecordingSession:
         #     f"Piezo baud: "
         #     f"{self.piezo_baud}"
         # )
+
+        print(
+            "Force/torque port: "
+            + (
+                self.ft_port
+                if self.ft_enabled
+                else "(external -- streamed by auto_record_launcher.py)"
+            )
+        )
 
         print(
             f"Camera index: "
