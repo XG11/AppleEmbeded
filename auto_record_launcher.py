@@ -2,6 +2,7 @@ import argparse
 import csv
 import json
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import List, Optional
@@ -11,6 +12,7 @@ from serial.tools import list_ports
 
 from mms101.continuous_stream import ContinuousForceTorqueStreamer
 from mms101.mms101_read import AXES
+from recorder.shared import monotonic_ns
 
 
 # ============================================================
@@ -165,61 +167,107 @@ def write_force_torque_csv(
 # WAIT FOR SESSION START
 # ============================================================
 
-def wait_for_session_start(port: str):
+def wait_for_session_start_and_capture(port: str):
     """
-    Open the Teensy serial port and wait until the firmware sends:
+    Open the station controller serial port, wait until the firmware
+    sends SESSION_START, then keep reading in a background thread for
+    the rest of the trial instead of closing the port.
 
-        SESSION_START
+    Every line is stamped with monotonic_ns() -- the same host clock
+    as session_t0_ns (recorder/session.py) and every other recorder
+    channel (recorder/shared.py) -- the instant it arrives. This is
+    what lets connector events (FIRST_FULL_CONNECT, SUCCESS_DETECTED,
+    ...) be converted to host_elapsed_s later, instead of only being
+    known in the station's own free-running millis() clock (see
+    save_label's docstring for why that distinction matters).
 
-    Then close the port so record_multimodal.py can use it.
+    Returns (ser, thread, stop_flag, events); the caller must
+    stop_capture(ser, thread, stop_flag) when the trial is done.
     """
 
     print(f"Waiting for controller on {port}...")
 
-    with serial.Serial(
+    ser = serial.Serial(
         port,
         BAUD_RATE,
         timeout=0.1,
-    ) as ser:
+    )
 
-        # Teensy USB serial may need a moment after opening.
-        time.sleep(0.5)
+    # Teensy USB serial may need a moment after opening.
+    time.sleep(0.5)
 
-        ser.reset_input_buffer()
+    ser.reset_input_buffer()
 
-        print()
-        print("========================================")
-        print("READY FOR TRIAL")
-        print("Green flashing = idle")
-        print("Hold the physical button to start.")
-        print("========================================")
-        print()
+    print()
+    print("========================================")
+    print("READY FOR TRIAL")
+    print("Green flashing = idle")
+    print("Hold the physical button to start.")
+    print("========================================")
+    print()
 
-        while True:
-            raw = ser.readline()
+    events = []
 
-            if not raw:
+    def read_line():
+        raw = ser.readline()
+
+        if not raw:
+            return None
+
+        try:
+            line = raw.decode(
+                "utf-8",
+                errors="ignore",
+            ).strip()
+
+        except Exception:
+            return None
+
+        return line or None
+
+    # Block in the main thread until SESSION_START, so the trial
+    # subprocess is never launched before it.
+    while True:
+        line = read_line()
+
+        if line is None:
+            continue
+
+        events.append((monotonic_ns(), line))
+
+        print(f"[controller] {line}")
+
+        if line == "SESSION_START":
+            print()
+            print("Session trigger received.")
+            print("Recording started.")
+            break
+
+    stop_flag = threading.Event()
+
+    def read_loop():
+        while not stop_flag.is_set():
+            line = read_line()
+
+            if line is None:
                 continue
 
-            try:
-                line = raw.decode(
-                    "utf-8",
-                    errors="ignore",
-                ).strip()
+            events.append((monotonic_ns(), line))
 
-            except Exception:
-                continue
+    thread = threading.Thread(
+        target=read_loop,
+        name="controller-events",
+        daemon=True,
+    )
+    thread.start()
 
-            if not line:
-                continue
+    return ser, thread, stop_flag, events
 
-            print(f"[controller] {line}")
 
-            if line == "SESSION_START":
-                print()
-                print("Session trigger received.")
-                print("Recording started.")
-                return
+def stop_capture(ser, thread, stop_flag):
+    stop_flag.set()
+    thread.join(timeout=2.0)
+    ser.close()
 
 
 # ============================================================
@@ -688,6 +736,31 @@ def get_trial_result(port: str):
         )
 
 
+    # success_times and success_confirm_times come from two separate
+    # serial round trips (GET_SUCCESS_TIMES / GET_SUCCESS_CONFIRM_TIMES),
+    # each with its own timeout -- one can come back short if a response
+    # is dropped or truncated, even though the other succeeded fully.
+    # Align them by index to actual_count so every other success_* list
+    # can be indexed together safely (see get_connector_host_elapsed_s).
+
+    if len(success_confirm_times) != actual_count:
+
+        print(
+            "WARNING: GET_SUCCESS_TIMES returned "
+            f"{actual_count} value(s), but GET_SUCCESS_CONFIRM_TIMES "
+            f"returned {len(success_confirm_times)} -- padding/"
+            "truncating to align by index."
+        )
+
+        success_confirm_times = (
+            success_confirm_times[:actual_count]
+            + [None] * max(
+                0,
+                actual_count - len(success_confirm_times),
+            )
+        )
+
+
     # Determine label from the actual event list.
     #
     # If at least one confirmed insertion occurred:
@@ -764,6 +837,120 @@ def find_new_session_directory(
 
 
 # ============================================================
+# CONNECTOR EVENTS, HOST CLOCK
+# ============================================================
+
+def get_connector_host_elapsed_s(events, session_dir: Path, result: dict):
+    """
+    Convert the live-captured controller events (see
+    wait_for_session_start_and_capture) into host_elapsed_s -- the
+    same clock as imu_loadcell.csv, force_torque.csv, and
+    button_press_times_s -- using this trial's session_t0_ns from
+    metadata.json.
+
+    A leftover SUCCESS_DETECTED/FIRST_FULL_CONNECT line from a
+    PREVIOUS trial can still arrive during this trial's capture
+    window -- observed in practice, apparently sitting in the
+    station's USB buffer across a port close/reopen -- and a stale
+    line's index can coincidentally fall in range. So instead of
+    trusting index/arrival-order alone, each captured line's embedded
+    station-clock value(s) are cross-checked against `result` (this
+    trial's OWN authoritative post-trial query response -- see
+    get_trial_result) before being accepted; anything that doesn't
+    match exactly is a stale line and is dropped.
+
+    Returns (first_full_connect_host_elapsed_s, success_host_elapsed_s).
+    success_host_elapsed_s is always the same length as
+    result["success_times_ms"], with None for any entry whose line
+    never arrived (dropped) or never matched (stale).
+    """
+
+    metadata_path = session_dir / "metadata.json"
+
+    if not metadata_path.exists():
+        return None, [None] * len(result.get("success_times_ms") or [])
+
+    with metadata_path.open(encoding="utf-8") as f:
+        metadata = json.load(f)
+
+    session_t0_ns = metadata.get("host_monotonic_start_ns")
+
+    if session_t0_ns is None:
+        return None, [None] * len(result.get("success_times_ms") or [])
+
+    def host_elapsed_s(host_time_ns):
+        return (host_time_ns - session_t0_ns) / 1_000_000_000.0
+
+    first_full_connect_ms = result.get("first_full_connect_time_ms")
+    first_full_connect_host_elapsed_s = None
+
+    success_times_ms = result.get("success_times_ms") or []
+    success_confirm_times_ms = result.get("success_confirm_times_ms") or []
+    success_host_elapsed_s = [None] * len(success_times_ms)
+
+    for host_time_ns, line in events:
+        if (
+            first_full_connect_host_elapsed_s is None
+            and first_full_connect_ms is not None
+            and line.startswith("FIRST_FULL_CONNECT,")
+        ):
+            parts = line.split(",")
+
+            try:
+                ms = int(parts[1])
+
+            except (IndexError, ValueError):
+                continue
+
+            if ms == first_full_connect_ms:
+                first_full_connect_host_elapsed_s = (
+                    host_elapsed_s(host_time_ns)
+                )
+
+        elif line.startswith("SUCCESS_DETECTED,"):
+            parts = line.split(",")
+
+            try:
+                index = int(parts[1])
+                start_ms = int(parts[2])
+                confirm_ms = int(parts[3])
+
+            except (IndexError, ValueError):
+                continue
+
+            # success_confirm_times_ms can be shorter than
+            # success_times_ms, or hold None at an index (the
+            # GET_SUCCESS_CONFIRM_TIMES query failed/returned NONE
+            # that trial -- a separate serial round trip from
+            # GET_SUCCESS_TIMES, so one can fail independently of the
+            # other). When confirm data isn't available to cross-check,
+            # fall back to matching on index + start_ms alone, which
+            # is already specific enough to rule out a stale line from
+            # another trial.
+            confirm_known = (
+                index < len(success_confirm_times_ms)
+                and success_confirm_times_ms[index] is not None
+            )
+
+            if (
+                0 <= index < len(success_times_ms)
+                and start_ms == success_times_ms[index]
+                and (
+                    not confirm_known
+                    or confirm_ms == success_confirm_times_ms[index]
+                )
+            ):
+                success_host_elapsed_s[index] = (
+                    host_elapsed_s(host_time_ns)
+                )
+
+    return (
+        first_full_connect_host_elapsed_s,
+        success_host_elapsed_s,
+    )
+
+
+# ============================================================
 # BUTTON PRESS TIMES
 # ============================================================
 
@@ -819,23 +1006,44 @@ def save_label(
     session_dir: Path,
     result: dict,
     button_press_times_s=None,
+    first_full_connect_host_elapsed_s=None,
+    success_host_elapsed_s=None,
 ):
     """
     Save all successful insertion timestamps.
 
-    success_times_ms:
-        Ground-truth insertion event timestamps.
-
-        Each timestamp corresponds to the moment all four
-        connector contacts first became connected for an
-        insertion that subsequently remained connected for at
-        least SUCCESS_CONFIRM_MS.
+    success_times_ms / first_full_connect_time_ms:
+        Ground-truth insertion event timestamps, in the station
+        controller's own free-running millis() clock (zeroed at
+        that board's button long-press). Each success_times_ms
+        entry is the moment all four connector contacts first
+        became connected for an insertion that subsequently
+        remained connected for at least SUCCESS_CONFIRM_MS.
 
     success_confirm_times_ms:
         Time at which the dwell-time confirmation completed.
 
         Useful for debugging, but normally NOT the ground-truth
         event timestamp used for ML training.
+
+    first_full_connect_host_elapsed_s / success_host_elapsed_s:
+        The SAME events as above, but timestamped by the host the
+        instant each serial line arrived (see
+        get_connector_host_elapsed_s / monotonic_ns), so they are
+        in host_elapsed_s -- the same clock as imu_loadcell.csv,
+        force_torque.csv, the microphone, GelSight, and
+        button_press_times_s. Prefer these over the *_ms fields
+        above when aligning connector events against any other
+        recorded channel; the *_ms fields remain for reference
+        since they come straight from the station's own detection
+        logic and never depend on serial delivery.
+
+        success_host_elapsed_s is always the same length and order
+        as success_times_ms; an entry is null if that event's serial
+        line was never captured live, or was dropped as stale (see
+        get_connector_host_elapsed_s) -- in which case success_times_ms
+        at that index is still the ground truth, just not expressible
+        in host_elapsed_s for this trial.
 
     button_press_times_s:
         Operator mark-button press times, in host_elapsed_s --
@@ -890,6 +1098,19 @@ def save_label(
             result[
                 "first_full_connect_time_ms"
             ],
+
+
+        # ----------------------------------------------------
+        # Same two events above, in host_elapsed_s -- the same
+        # clock as imu_loadcell.csv, force_torque.csv, and
+        # button_press_times_s. See get_connector_host_elapsed_s.
+        # ----------------------------------------------------
+
+        "first_full_connect_host_elapsed_s":
+            first_full_connect_host_elapsed_s,
+
+        "success_host_elapsed_s":
+            success_host_elapsed_s or [],
 
 
         # ----------------------------------------------------
@@ -1012,7 +1233,7 @@ def main():
     parser.add_argument(
         "--ft-warmup-seconds",
         type=float,
-        default=600.0,
+        default=60.0,
         help=(
             "How long to stream the force/torque sensor before "
             "taring, in seconds, at startup. Default: 300 (5 min)."
@@ -1261,9 +1482,15 @@ def run_trial_loop(
         # ====================================================
         # WAIT FOR PHYSICAL BUTTON
         # ====================================================
+        #
+        # Keeps the controller port open and live-capturing events
+        # (host-timestamped) all the way through the recording below,
+        # instead of closing it right after SESSION_START.
 
-        wait_for_session_start(
-            controller_port
+        ser, capture_thread, stop_flag, events = (
+            wait_for_session_start_and_capture(
+                controller_port
+            )
         )
 
 
@@ -1304,6 +1531,11 @@ def run_trial_loop(
         print(
             "Recording finished."
         )
+
+
+        # Stop live-capturing and release the port so get_trial_result
+        # below can reconnect to query it.
+        stop_capture(ser, capture_thread, stop_flag)
 
 
         # ====================================================
@@ -1428,11 +1660,39 @@ def run_trial_loop(
                 )
             )
 
+            (
+                first_full_connect_host_elapsed_s,
+                success_host_elapsed_s,
+            ) = get_connector_host_elapsed_s(
+                events,
+                session_dir,
+                result,
+            )
+
+            missing = sum(
+                1 for v in success_host_elapsed_s if v is None
+            )
+
+            if missing:
+                print(
+                    "WARNING: "
+                    f"{missing} of {len(success_host_elapsed_s)} "
+                    "success event(s) have no host-aligned timestamp "
+                    "(dropped or stale serial line) -- see null "
+                    "entries in success_host_elapsed_s."
+                )
+
             save_label(
                 session_dir,
                 result,
                 button_press_times_s=(
                     button_press_times_s
+                ),
+                first_full_connect_host_elapsed_s=(
+                    first_full_connect_host_elapsed_s
+                ),
+                success_host_elapsed_s=(
+                    success_host_elapsed_s
                 ),
             )
 

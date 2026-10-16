@@ -48,8 +48,16 @@ def load_connect_time_s(session_dir, event_index=0):
     """
     Load the electrical-connection timestamp from connector_label.json.
 
-    Uses success_times_ms, which is the ground-truth confirmed-insertion
-    timestamp (see auto_record_launcher.py's save_label docstring).
+    Prefers success_host_elapsed_s, which is timestamped by the host
+    the instant each event arrived over serial -- the same clock as
+    imu_loadcell.csv, so it lines up with the plot's time axis (see
+    auto_record_launcher.py's get_connector_host_elapsed_s /
+    save_label docstrings). Falls back to success_times_ms (the
+    station controller's own millis() clock, zeroed at its button
+    press -- NOT comparable to this plot's time axis) for an older
+    session recorded before host-aligned timestamps existed, or for
+    one entry whose serial line was dropped/stale (null in
+    success_host_elapsed_s).
     """
     label_path = session_dir / "connector_label.json"
 
@@ -59,10 +67,24 @@ def load_connect_time_s(session_dir, event_index=0):
     with label_path.open() as f:
         label = json.load(f)
 
+    success_host_elapsed_s = label.get("success_host_elapsed_s") or []
+
+    if (
+        event_index < len(success_host_elapsed_s)
+        and success_host_elapsed_s[event_index] is not None
+    ):
+        return success_host_elapsed_s[event_index]
+
     success_times_ms = label.get("success_times_ms") or []
 
     if event_index >= len(success_times_ms):
         return None
+
+    print(
+        "WARNING: no success_host_elapsed_s for this event -- "
+        "falling back to success_times_ms, which is on the station "
+        "controller's own clock and will be misaligned with this plot."
+    )
 
     return success_times_ms[event_index] / 1000.0
 
